@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "mycodeagent-12/Qwen/Qwen3-32B-AWQ",
+  "provider": {
+    "mycodeagent-12": {
+      "models": {
+        "Qwen/Qwen3-32B-AWQ": {
+          "limit": {
+            "context": 32768,
+            "output": 16384
+          },
+          "name": "Qwen/Qwen3-32B-AWQ"
+        }
+      },
+      "name": "mycodeagent qwen3-32b-awq",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:8000/v1"
+      }
+    }
+  }
+}

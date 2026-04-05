@@ -169,25 +169,28 @@ func (s *DeployService) Stop(id int64) error {
 	return s.instances.Update(inst)
 }
 
-// KillAll stops all running instances.
-func (s *DeployService) KillAll() error {
-	instances, err := s.instances.FindRunning()
+// Destroy destroys a single instance permanently.
+func (s *DeployService) Destroy(id int64) error {
+	inst, err := s.instances.FindByID(id)
 	if err != nil {
 		return err
 	}
-	for _, inst := range instances {
-		fmt.Printf("Stopping instance %d (%s)...\n", inst.ID, inst.ModelName)
-		if err := s.Stop(inst.ID); err != nil {
-			fmt.Printf("  Error: %v\n", err)
-		}
+
+	s.ssh.StopTunnel(inst.TunnelPID)
+
+	if err := s.vastai.DestroyInstance(int(inst.VastaiID)); err != nil {
+		return fmt.Errorf("destroy vast.ai instance: %w", err)
 	}
-	return nil
+
+	return s.instances.Delete(inst.ID)
 }
 
 func (s *DeployService) buildVLLMCommand(model *entity.Model) string {
-	cmd := fmt.Sprintf("vllm serve '%s' --host 0.0.0.0 --port 8000", model.HFRepo)
+	vllmCmd := fmt.Sprintf("vllm serve '%s' --host 0.0.0.0 --port 8000", model.HFRepo)
 	for _, arg := range model.VLLMArgs {
-		cmd += " " + arg
+		vllmCmd += " " + arg
 	}
-	return cmd
+	// Write as a script to avoid shell line-splitting issues in vast.ai onstart
+	script := fmt.Sprintf("echo '%s' > /tmp/start_vllm.sh && chmod +x /tmp/start_vllm.sh && bash /tmp/start_vllm.sh 2>&1 | tee /tmp/vllm.log", vllmCmd)
+	return script
 }

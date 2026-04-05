@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
+	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/vastai"
 	"github.com/spf13/cobra"
 )
@@ -18,68 +20,113 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 		Use:   "ps",
 		Short: "List deployed instances",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Fetch live instances from vast.ai
 			remoteInstances, err := vastaiClient.ListInstances()
 			if err != nil {
 				return fmt.Errorf("fetch instances from vast.ai: %w", err)
 			}
 
-			if len(remoteInstances) == 0 {
-				fmt.Println("No instances on vast.ai.")
+			// Build remote lookup
+			remoteMap := make(map[int64]vastai.InstanceInfo)
+			for _, ri := range remoteInstances {
+				remoteMap[int64(ri.ID)] = ri
+			}
+
+			// Get all local records
+			localInstances, _ := app.Instances.FindAll()
+
+			// 1. Update or delete existing local records; deduplicate by vastai_id
+			seen := make(map[int64]bool)
+			for _, local := range localInstances {
+				remote, exists := remoteMap[local.VastaiID]
+				if !exists || seen[local.VastaiID] {
+					// Gone from vast.ai or duplicate — delete
+					app.Instances.Delete(local.ID)
+					continue
+				}
+				seen[local.VastaiID] = true
+				// Update status and SSH info from remote, preserve tunnel info
+				local.Status = entity.InstanceStatus(remote.ActualStatus)
+				if remote.SSHHost != "" {
+					local.SSHHost = remote.SSHHost
+				}
+				if p := remote.GetSSHPort(); p > 0 {
+					local.SSHPort = p
+				}
+				local.HourlyRate = remote.DPHTotal
+				app.Instances.Update(local)
+			}
+
+			// 2. Add new remote instances not in local DB
+			localInstances, _ = app.Instances.FindAll()
+			localVastIDs := make(map[int64]bool)
+			for _, li := range localInstances {
+				localVastIDs[li.VastaiID] = true
+			}
+			for _, ri := range remoteInstances {
+				vastID := int64(ri.ID)
+				if !localVastIDs[vastID] {
+					modelName := detectModelFromOnstart(ri.Onstart, app)
+					inst := &entity.Instance{
+						VastaiID:   vastID,
+						ModelName:  modelName,
+						Status:     entity.InstanceStatus(ri.ActualStatus),
+						SSHHost:    ri.SSHHost,
+						SSHPort:    ri.GetSSHPort(),
+						HourlyRate: ri.DPHTotal,
+					}
+					app.Instances.Save(inst)
+				}
+			}
+
+			// 3. Display
+			localInstances, _ = app.Instances.FindAll()
+			if len(localInstances) == 0 {
+				fmt.Println("No instances.")
 				return nil
 			}
 
-			// Build local DB lookup by vastai_id
-			localInstances, _ := app.Instances.FindAll()
-			localMap := make(map[int64]localInfo)
-			for _, li := range localInstances {
-				localMap[li.VastaiID] = localInfo{
-					modelName: li.ModelName,
-					localPort: li.LocalPort,
-					tunnelPID: li.TunnelPID,
-				}
-			}
-
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "VAST ID\tSTATUS\tMODEL\tTUNNEL URL")
-			fmt.Fprintln(w, "-------\t------\t-----\t----------")
+			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tMODEL\tTUNNEL URL")
+			fmt.Fprintln(w, "--\t-------\t------\t-----\t----------")
 
-			for _, ri := range remoteInstances {
-				vastID := int64(ri.ID)
-				model := "unknown"
+			for _, inst := range localInstances {
 				tunnelURL := "-"
+				if inst.LocalPort > 0 {
+					tunnelURL = fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
+				}
 
-				if li, ok := localMap[vastID]; ok {
-					model = li.modelName
-					if li.localPort > 0 {
-						tunnelURL = fmt.Sprintf("http://localhost:%d/v1", li.localPort)
+				// Try to detect model via vLLM API if unknown and tunnel is up
+				if inst.ModelName == "unknown" && inst.LocalPort > 0 {
+					if detected := detectModel(inst.LocalPort); detected != "" {
+						inst.ModelName = detected
+						app.Instances.Update(inst)
 					}
 				}
 
-				// If model unknown and instance is running, try to detect via vLLM API
-				if model == "unknown" && ri.ActualStatus == "running" {
-					if li, ok := localMap[vastID]; ok && li.localPort > 0 {
-						if detected := detectModel(li.localPort); detected != "" {
-							model = detected
-						}
-					}
-				}
-
-				fmt.Fprintf(w, "%d\t%s\t%s\t%s\n",
-					ri.ID, ri.ActualStatus, model, tunnelURL)
+				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\n",
+					inst.ID, inst.VastaiID, inst.Status, inst.ModelName, tunnelURL)
 			}
 			return w.Flush()
 		},
 	}
 }
 
-type localInfo struct {
-	modelName string
-	localPort int
-	tunnelPID int
+func detectModelFromOnstart(onstart string, app *application.App) string {
+	models, _ := app.Models.FindAll()
+	for _, m := range models {
+		if strings.Contains(onstart, m.HFRepo) {
+			return m.Name
+		}
+	}
+	if idx := strings.Index(onstart, "vllm serve '"); idx >= 0 {
+		rest := onstart[idx+len("vllm serve '"):]
+		if end := strings.Index(rest, "'"); end >= 0 {
+			return rest[:end]
+		}
+	}
+	return "unknown"
 }
 
-// detectModel calls the vLLM /v1/models endpoint via the local tunnel to find out which model is served.
 func detectModel(localPort int) string {
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/v1/models", localPort))

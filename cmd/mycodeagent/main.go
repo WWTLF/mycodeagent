@@ -47,8 +47,10 @@ func main() {
 	)
 
 	rootCmd := &cobra.Command{
-		Use:   "mycodeagent",
-		Short: "Deploy and manage vLLM models on vast.ai",
+		Use:           "mycodeagent",
+		Short:         "Deploy and manage vLLM models on vast.ai",
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			verbose, _ := cmd.Flags().GetBool("verbose")
 			vastaiClient.SetVerbose(verbose)
@@ -66,7 +68,9 @@ func main() {
 		commands.NewKillCmd(deploySvc),
 		commands.NewBudgetCmd(app),
 		commands.NewTunnelCmd(app, vastaiClient, cfg.BasePort),
+		commands.NewLogCmd(app, vastaiClient),
 		commands.NewInfoCmd(app),
+		commands.NewConfigCmd(app),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

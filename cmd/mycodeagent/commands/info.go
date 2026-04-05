@@ -27,7 +27,12 @@ func NewInfoCmd(app *application.App) *cobra.Command {
 					return err
 				}
 				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
-				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL)
+				// Use HF repo as model name (that's what vLLM serves)
+				hfRepo := inst.ModelName
+				if m, err := app.Models.FindByName(inst.ModelName); err == nil {
+					hfRepo = m.HFRepo
+				}
+				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL, hfRepo)
 				return nil
 			}
 
@@ -44,7 +49,11 @@ func NewInfoCmd(app *application.App) *cobra.Command {
 			if len(instances) == 1 {
 				inst := instances[0]
 				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
-				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL)
+				hfRepo := inst.ModelName
+				if m, err := app.Models.FindByName(inst.ModelName); err == nil {
+					hfRepo = m.HFRepo
+				}
+				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL, hfRepo)
 				return nil
 			}
 
@@ -62,14 +71,14 @@ func NewInfoCmd(app *application.App) *cobra.Command {
 	}
 }
 
-func printInstanceInfo(id int64, modelName, status, baseURL string) {
+func printInstanceInfo(id int64, modelName, status, baseURL, hfRepo string) {
 	fmt.Printf("=== Instance %d: %s (%s) ===\n", id, modelName, status)
 	fmt.Println()
 	fmt.Println("Endpoint:", baseURL)
 	fmt.Println()
 	fmt.Println("--- opencode.json ---")
 	fmt.Println()
-	printExampleConfig(baseURL, modelName)
+	printExampleConfig(baseURL, hfRepo)
 	fmt.Println()
 	fmt.Println("--- environment variables ---")
 	fmt.Println()
@@ -78,25 +87,24 @@ func printInstanceInfo(id int64, modelName, status, baseURL string) {
 	fmt.Println()
 }
 
-func printExampleConfig(baseURL, modelName string) {
-	fmt.Println(`{`)
-	fmt.Println(`  "provider": {`)
-	fmt.Println(`    "vllm": {`)
-	fmt.Println(`      "name": "Local vLLM",`)
-	fmt.Println(`      "type": "openai",`)
-	fmt.Printf(`      "baseURL": "%s",`+"\n", baseURL)
-	fmt.Println(`      "apiKey": "not-needed"`)
-	fmt.Println(`    }`)
-	fmt.Println(`  },`)
-	fmt.Println(`  "model": {`)
-	fmt.Println(`    "full": {`)
-	fmt.Println(`      "provider": "vllm",`)
-	fmt.Printf(`      "model": "%s"`+"\n", modelName)
-	fmt.Println(`    },`)
-	fmt.Println(`    "mini": {`)
-	fmt.Println(`      "provider": "vllm",`)
-	fmt.Printf(`      "model": "%s"`+"\n", modelName)
-	fmt.Println(`    }`)
-	fmt.Println(`  }`)
-	fmt.Println(`}`)
+func printExampleConfig(baseURL, hfRepo string) {
+	fmt.Printf(`{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "mycodeagent": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "mycodeagent vLLM",
+      "options": {
+        "baseURL": "%s"
+      },
+      "models": {
+        "%s": {
+          "name": "%s"
+        }
+      }
+    }
+  },
+  "model": "mycodeagent/%s"
+}
+`, baseURL, hfRepo, hfRepo, hfRepo)
 }

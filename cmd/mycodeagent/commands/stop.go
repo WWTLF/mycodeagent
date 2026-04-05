@@ -11,7 +11,7 @@ import (
 func NewStopCmd(deploySvc *service.DeployService) *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop <id>",
-		Short: "Stop an instance",
+		Short: "Stop an instance (keeps disk, can restart later)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, err := strconv.ParseInt(args[0], 10, 64)

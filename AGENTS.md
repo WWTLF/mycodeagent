@@ -89,7 +89,7 @@ Run before committing or pushing: `go build -o mycodeagent ./cmd/mycodeagent && 
 
 Follow `func OpenDB()` or `func SearchOffers(...)` not `func opendb()`.
 
-Enums are capitalized consts: `StatusRunning Status = "running"`, not `"RUNNING"`.
+Enums are capitalized consts: `StatusRunning Status = "running"`, not "RUNNING".
 
 ### Types & Structs
 

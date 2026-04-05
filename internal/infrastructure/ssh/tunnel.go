@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -18,15 +20,31 @@ type Tunnel struct {
 
 // StartTunnel creates an SSH tunnel forwarding localPort to remote localhost:8000.
 func StartTunnel(localPort int, sshHost string, sshPort int) (*Tunnel, error) {
-	cmd := exec.Command("ssh",
+	// Find SSH key
+	homeDir, _ := os.UserHomeDir()
+	sshKey := ""
+	for _, name := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
+		path := filepath.Join(homeDir, ".ssh", name)
+		if _, err := os.Stat(path); err == nil {
+			sshKey = path
+			break
+		}
+	}
+
+	args := []string{
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ExitOnForwardFailure=yes",
 		"-N",
 		"-L", fmt.Sprintf("%d:localhost:8000", localPort),
 		"-p", fmt.Sprintf("%d", sshPort),
-		fmt.Sprintf("root@%s", sshHost),
-	)
+	}
+	if sshKey != "" {
+		args = append(args, "-i", sshKey)
+	}
+	args = append(args, fmt.Sprintf("root@%s", sshHost))
+
+	cmd := exec.Command("ssh", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {

@@ -32,11 +32,11 @@ func (c *Client) SetVerbose(v bool) {
 }
 
 type Offer struct {
-	ID         int     `json:"id"`
-	GPUName    string  `json:"gpu_name"`
-	NumGPUs    int     `json:"num_gpus"`
-	GPUMemory  float64 `json:"gpu_ram"`
-	DPHTotal   float64 `json:"dph_total"` // dollars per hour
+	ID          int     `json:"id"`
+	GPUName     string  `json:"gpu_name"`
+	NumGPUs     int     `json:"num_gpus"`
+	GPUMemory   float64 `json:"gpu_ram"`
+	DPHTotal    float64 `json:"dph_total"` // dollars per hour
 	Reliability float64 `json:"reliability"`
 }
 
@@ -44,10 +44,12 @@ type InstanceInfo struct {
 	ID           int     `json:"id"`
 	ActualStatus string  `json:"actual_status"`
 	PublicIPAddr string  `json:"public_ipaddr"`
+	SSHHost      string  `json:"ssh_host"`
 	SSHPort      int     `json:"ssh_port"`
 	DPHTotal     float64 `json:"dph_total"`
 	Label        string  `json:"label"`
 	ImageUUID    string  `json:"image_uuid"`
+	Onstart      string  `json:"onstart"`
 	// Ports is a nested map: {"22/tcp": [{"HostPort": "12345"}]}
 	Ports map[string][]PortMapping `json:"ports"`
 }
@@ -66,8 +68,8 @@ func (i *InstanceInfo) GetSSHPort() int {
 }
 
 type CreateInstanceResponse struct {
-	Success     bool   `json:"success"`
-	NewContract string `json:"new_contract"`
+	Success     bool        `json:"success"`
+	NewContract json.Number `json:"new_contract"`
 }
 
 type Invoice struct {
@@ -118,7 +120,7 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int) ([]Offer, error) {
 	if numGPUs <= 0 {
 		numGPUs = 1
 	}
-	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs)
+	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs)
 
 	var offers struct {
 		Offers []Offer `json:"offers"`
@@ -158,11 +160,13 @@ func (c *Client) CreateInstance(offerID int, image string, envVars map[string]st
 func (c *Client) GetInstance(instanceID int) (*InstanceInfo, error) {
 	url := fmt.Sprintf("%s/api/v0/instances/%d/", baseURL, instanceID)
 
-	var inst InstanceInfo
-	if err := c.doGet(url, &inst); err != nil {
+	var wrapper struct {
+		Instances InstanceInfo `json:"instances"`
+	}
+	if err := c.doGet(url, &wrapper); err != nil {
 		return nil, fmt.Errorf("get instance %d: %w", instanceID, err)
 	}
-	return &inst, nil
+	return &wrapper.Instances, nil
 }
 
 // ListInstances returns all user instances.
@@ -182,7 +186,7 @@ func (c *Client) ListInstances() ([]InstanceInfo, error) {
 func (c *Client) StopInstance(instanceID int) error {
 	url := fmt.Sprintf("%s/api/v0/instances/%d/", baseURL, instanceID)
 
-	body := map[string]any{"target_state": "stopped"}
+	body := map[string]any{"state": "stopped"}
 	var resp map[string]any
 	if err := c.doPut(url, body, &resp); err != nil {
 		return fmt.Errorf("stop instance %d: %w", instanceID, err)
@@ -198,6 +202,27 @@ func (c *Client) DestroyInstance(instanceID int) error {
 		return fmt.Errorf("destroy instance %d: %w", instanceID, err)
 	}
 	return nil
+}
+
+// GetInstanceLogs requests logs for an instance. Returns a URL to download them.
+func (c *Client) GetInstanceLogs(instanceID int) (string, error) {
+	url := fmt.Sprintf("%s/api/v1/instances/%d/logs/", baseURL, instanceID)
+	var result map[string]any
+	if err := c.doGet(url, &result); err != nil {
+		return "", fmt.Errorf("get logs for instance %d: %w", instanceID, err)
+	}
+	if logURL, ok := result["log_url"].(string); ok {
+		return logURL, nil
+	}
+	// Try alternate field names
+	for _, key := range []string{"url", "logs_url", "s3_url"} {
+		if v, ok := result[key].(string); ok {
+			return v, nil
+		}
+	}
+	// Return raw response for debugging
+	data, _ := json.Marshal(result)
+	return "", fmt.Errorf("no log URL in response: %s", string(data))
 }
 
 // GetInvoices returns billing invoices.

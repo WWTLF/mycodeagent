@@ -2,7 +2,6 @@ package vastai
 
 import (
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/domain/service"
@@ -48,11 +47,11 @@ func (a *Adapter) CreateInstance(offerID int, image string, envVars map[string]s
 	if !resp.Success {
 		return 0, fmt.Errorf("create instance failed")
 	}
-	id, err := strconv.Atoi(resp.NewContract)
+	id, err := resp.NewContract.Int64()
 	if err != nil {
 		return 0, fmt.Errorf("parse instance ID %q: %w", resp.NewContract, err)
 	}
-	return id, nil
+	return int(id), nil
 }
 
 func (a *Adapter) WaitForInstance(instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error) {
@@ -63,8 +62,12 @@ func (a *Adapter) WaitForInstance(instanceID int) (sshHost string, sshPort int, 
 			continue
 		}
 		if inst.ActualStatus == "running" {
+			host := inst.SSHHost
+			if host == "" {
+				host = inst.PublicIPAddr
+			}
 			port := inst.GetSSHPort()
-			return inst.PublicIPAddr, port, inst.DPHTotal, nil
+			return host, port, inst.DPHTotal, nil
 		}
 		fmt.Printf("  [%d/30] Status: %s\n", i+1, inst.ActualStatus)
 		time.Sleep(10 * time.Second)
