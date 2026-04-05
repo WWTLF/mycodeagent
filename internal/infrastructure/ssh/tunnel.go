@@ -1,0 +1,106 @@
+package ssh
+
+import (
+	"fmt"
+	"net"
+	"net/http"
+	"os/exec"
+	"syscall"
+	"time"
+)
+
+type Tunnel struct {
+	LocalPort int
+	SSHHost   string
+	SSHPort   int
+	PID       int
+}
+
+// StartTunnel creates an SSH tunnel forwarding localPort to remote localhost:8000.
+func StartTunnel(localPort int, sshHost string, sshPort int) (*Tunnel, error) {
+	cmd := exec.Command("ssh",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ExitOnForwardFailure=yes",
+		"-N",
+		"-L", fmt.Sprintf("%d:localhost:8000", localPort),
+		"-p", fmt.Sprintf("%d", sshPort),
+		fmt.Sprintf("root@%s", sshHost),
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start ssh tunnel: %w", err)
+	}
+
+	return &Tunnel{
+		LocalPort: localPort,
+		SSHHost:   sshHost,
+		SSHPort:   sshPort,
+		PID:       cmd.Process.Pid,
+	}, nil
+}
+
+// StopTunnel kills the SSH tunnel process by PID.
+func StopTunnel(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	return syscall.Kill(pid, syscall.SIGTERM)
+}
+
+// WaitForSSH waits until SSH is reachable on the given host:port.
+func WaitForSSH(host string, port int, maxAttempts int) error {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	for i := 0; i < maxAttempts; i++ {
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return fmt.Errorf("SSH not reachable at %s after %d attempts", addr, maxAttempts)
+}
+
+// WaitForVLLMHealth waits until vLLM health endpoint responds via the local tunnel.
+func WaitForVLLMHealth(localPort int, maxAttempts int) error {
+	url := fmt.Sprintf("http://localhost:%d/health", localPort)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for i := 0; i < maxAttempts; i++ {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return nil
+			}
+		}
+		time.Sleep(10 * time.Second)
+	}
+	return fmt.Errorf("vLLM not healthy at port %d after %d attempts", localPort, maxAttempts)
+}
+
+// RunRemoteCommand executes a command on the remote instance via SSH.
+func RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error) {
+	cmd := exec.Command("ssh",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "ConnectTimeout=10",
+		"-p", fmt.Sprintf("%d", sshPort),
+		fmt.Sprintf("root@%s", sshHost),
+		command,
+	)
+	return cmd.CombinedOutput()
+}
+
+// FindFreePort returns an available TCP port starting from basePort.
+func FindFreePort(basePort int) (int, error) {
+	for port := basePort; port < basePort+100; port++ {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			ln.Close()
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no free port found starting from %d", basePort)
+}
