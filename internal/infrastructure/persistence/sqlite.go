@@ -44,6 +44,15 @@ func migrate(db *sql.DB) error {
 			hourly_rate REAL,
 			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
+		CREATE TABLE IF NOT EXISTS volumes (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			vastai_id   INTEGER NOT NULL,
+			volume_name TEXT    NOT NULL,
+			size_gb     INTEGER NOT NULL,
+			mount_path  TEXT    NOT NULL DEFAULT '/root/.cache/huggingface',
+			machine_id  INTEGER NOT NULL DEFAULT 0,
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
 	`)
 	return err
 }

@@ -7,4 +7,5 @@ import (
 type App struct {
 	Models    repository.ModelRepository
 	Instances repository.InstanceRepository
+	Volumes   repository.VolumeRepository
 }

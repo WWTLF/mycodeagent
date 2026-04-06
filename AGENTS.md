@@ -143,6 +143,8 @@ See `.github/copilot-instructions.md` for detailed Copilot setup instructions sp
 
 ## Additional Notes
 
+- Model context window for Qwen3-32B-AWQ is ~32K tokens (check [Qwen docs](https://modelscope.cn/models/Qwen3-32B-AWQ/summary) for exact value)
+
 - Base deployment port defaults to 8000; configurable via env or config file
 - Models auto-download from HuggingFace on first launch and cache in `/root/.cache/huggingface/`
 - SSH/tunnel operations use standard Go `github.com/pkg/sftp` conventions for connection management

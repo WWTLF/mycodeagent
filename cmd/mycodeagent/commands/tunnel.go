@@ -87,7 +87,8 @@ func NewTunnelCmd(app *application.App, vastaiClient *vastai.Client, basePort in
 
 			fmt.Printf("Tunnel established: http://localhost:%d/v1 (PID %d)\n", localPort, tunnel.PID)
 
-			// Verify vLLM is serving
+			// Verify vLLM is serving (brief pause for tunnel to stabilize)
+			time.Sleep(3 * time.Second)
 			fmt.Print("Verifying vLLM... ")
 			client := &http.Client{Timeout: 5 * time.Second}
 			resp, err := client.Get(fmt.Sprintf("http://localhost:%d/v1/models", localPort))

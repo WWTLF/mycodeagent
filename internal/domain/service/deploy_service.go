@@ -12,10 +12,28 @@ import (
 // VastaiProvider abstracts vast.ai API operations for the domain layer.
 type VastaiProvider interface {
 	SearchOffers(minGPURAM int, numGPUs int) ([]OfferResult, error)
-	CreateInstance(offerID int, image string, envVars map[string]string, onstart string) (instanceID int, err error)
+	CreateInstance(offerID int, image string, envVars map[string]string, onstart string, volumeID int, mountPath string) (instanceID int, err error)
 	WaitForInstance(ctx context.Context, instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error)
 	StopInstance(instanceID int) error
 	DestroyInstance(instanceID int) error
+	SearchVolumeOffers(sizeGB int) ([]VolumeOfferResult, error)
+	RentVolume(offerID int, sizeGB int) (*VolumeResult, error)
+	ListVolumes() ([]VolumeResult, error)
+	DeleteVolume(volumeID int) error
+}
+
+type VolumeOfferResult struct {
+	ID        int
+	MachineID int
+	Location  string
+	DPHTotal  float64
+}
+
+type VolumeResult struct {
+	ID         int
+	VolumeName string
+	SizeGB     int
+	MachineID  int
 }
 
 // SSHTunnelProvider abstracts SSH tunnel operations for the domain layer.
@@ -38,6 +56,7 @@ type OfferResult struct {
 type DeployService struct {
 	models    repository.ModelRepository
 	instances repository.InstanceRepository
+	volumes   repository.VolumeRepository
 	vastai    VastaiProvider
 	ssh       SSHTunnelProvider
 	basePort  int
@@ -47,6 +66,7 @@ type DeployService struct {
 func NewDeployService(
 	models repository.ModelRepository,
 	instances repository.InstanceRepository,
+	volumes repository.VolumeRepository,
 	vastai VastaiProvider,
 	ssh SSHTunnelProvider,
 	basePort int,
@@ -55,6 +75,7 @@ func NewDeployService(
 	return &DeployService{
 		models:    models,
 		instances: instances,
+		volumes:   volumes,
 		vastai:    vastai,
 		ssh:       ssh,
 		basePort:  basePort,
@@ -63,7 +84,8 @@ func NewDeployService(
 }
 
 // Deploy executes the full init flow: find offer → create instance → SSH → vLLM → tunnel.
-func (s *DeployService) Deploy(modelName string) (*entity.Instance, error) {
+// If volumeDBID > 0, uses that specific volume; otherwise auto-selects the first available.
+func (s *DeployService) Deploy(modelName string, volumeDBID int64) (*entity.Instance, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -104,9 +126,12 @@ func (s *DeployService) Deploy(modelName string) (*entity.Instance, error) {
 		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
 	}
 
-	// 3. Create instance
+	// 3. Check for volume to attach
+	volumeID, mountPath := s.activeVolume(volumeDBID)
+
+	// 4. Create instance
 	fmt.Println("Creating instance...")
-	instanceID, err := s.vastai.CreateInstance(offer.ID, "vllm/vllm-openai:latest", envVars, vllmCmd)
+	instanceID, err := s.vastai.CreateInstance(offer.ID, "vllm/vllm-openai:latest", envVars, vllmCmd, volumeID, mountPath)
 	if err != nil {
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
@@ -173,6 +198,91 @@ func (s *DeployService) Deploy(modelName string) (*entity.Instance, error) {
 	return inst, nil
 }
 
+type CreateOnlyResult struct {
+	Instance   *entity.Instance
+	VLLMCommand string
+}
+
+// DeployCreateOnly creates the instance and waits for it to be running, but does not
+// set up the SSH tunnel or wait for vLLM health. Returns the instance with SSH details.
+func (s *DeployService) DeployCreateOnly(modelName string, volumeDBID int64) (*CreateOnlyResult, error) {
+	model, err := s.models.FindByName(modelName)
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := model.StartupTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// 1. Find cheapest offer
+	numGPUs := model.NumGPUs
+	if numGPUs <= 0 {
+		numGPUs = 1
+	}
+	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM...\n", numGPUs, model.VRAM)
+	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs)
+	if err != nil {
+		return nil, fmt.Errorf("search offers: %w", err)
+	}
+	if len(offers) == 0 {
+		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM", numGPUs, model.VRAM)
+	}
+	offer := offers[0]
+	fmt.Printf("Selected: %s (%.0fGB) at $%.3f/hr\n", offer.GPUName, offer.GPUMemory, offer.DPHTotal)
+
+	// 2. Build vLLM startup command
+	vllmCmd := s.buildVLLMCommand(model)
+
+	envVars := map[string]string{}
+	if s.hfToken != "" {
+		envVars["HF_TOKEN"] = s.hfToken
+		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
+	}
+
+	// 3. Check for volume to attach
+	volumeID, mountPath := s.activeVolume(volumeDBID)
+
+	// 4. Create instance
+	fmt.Println("Creating instance...")
+	instanceID, err := s.vastai.CreateInstance(offer.ID, "vllm/vllm-openai:latest", envVars, vllmCmd, volumeID, mountPath)
+	if err != nil {
+		return nil, fmt.Errorf("create instance: %w", err)
+	}
+	fmt.Printf("Instance created: %d\n", instanceID)
+
+	// 4. Wait for instance to be running
+	fmt.Println("Waiting for instance to start...")
+	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("wait for instance: %w", err)
+	}
+
+	// 5. Save instance (no tunnel, no health check)
+	inst := &entity.Instance{
+		VastaiID:   int64(instanceID),
+		ModelName:  model.Name,
+		Status:     entity.StatusRunning,
+		SSHHost:    sshHost,
+		SSHPort:    sshPort,
+		HourlyRate: hourlyRate,
+	}
+	if err := s.instances.Save(inst); err != nil {
+		return nil, fmt.Errorf("save instance: %w", err)
+	}
+
+	// Build the raw vLLM command (without the onstart wrapper)
+	rawCmd := fmt.Sprintf("vllm serve '%s' --host 0.0.0.0 --port 8000", model.HFRepo)
+	for _, arg := range model.VLLMArgs {
+		rawCmd += " " + arg
+	}
+
+	return &CreateOnlyResult{Instance: inst, VLLMCommand: rawCmd}, nil
+}
+
 // Stop stops a single instance by local DB ID.
 func (s *DeployService) Stop(id int64) error {
 	inst, err := s.instances.FindByID(id)
@@ -205,6 +315,34 @@ func (s *DeployService) Destroy(id int64) error {
 	}
 
 	return s.instances.Delete(inst.ID)
+}
+
+// activeVolume returns the volume ID and mount path.
+// If volumeDBID > 0, uses that specific volume; otherwise picks the first available.
+func (s *DeployService) activeVolume(volumeDBID int64) (int, string) {
+	vols, err := s.volumes.FindAll()
+	if err != nil || len(vols) == 0 {
+		return 0, ""
+	}
+
+	var vol *entity.Volume
+	if volumeDBID > 0 {
+		for _, v := range vols {
+			if v.ID == volumeDBID {
+				vol = v
+				break
+			}
+		}
+		if vol == nil {
+			fmt.Printf("Warning: volume %d not found, skipping\n", volumeDBID)
+			return 0, ""
+		}
+	} else {
+		vol = vols[0]
+	}
+
+	fmt.Printf("Attaching volume %s (ID %d) at %s\n", vol.VolumeName, vol.ID, vol.MountPath)
+	return int(vol.VastaiID), vol.MountPath
 }
 
 func (s *DeployService) buildVLLMCommand(model *entity.Model) string {

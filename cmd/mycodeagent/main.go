@@ -30,10 +30,12 @@ func main() {
 
 	modelRepo := persistence.NewStaticModelRepository()
 	instanceRepo := persistence.NewSQLiteInstanceRepository(db)
+	volumeRepo := persistence.NewSQLiteVolumeRepository(db)
 
 	app := &application.App{
 		Models:    modelRepo,
 		Instances: instanceRepo,
+		Volumes:   volumeRepo,
 	}
 
 	vastaiAdapter := vastai.NewAdapter(cfg.VastaiAPIKey)
@@ -41,10 +43,12 @@ func main() {
 	vastaiClient := vastai.NewClient(cfg.VastaiAPIKey)
 
 	deploySvc := service.NewDeployService(
-		modelRepo, instanceRepo,
+		modelRepo, instanceRepo, volumeRepo,
 		vastaiAdapter, sshAdapter,
 		cfg.BasePort, cfg.HFToken,
 	)
+
+	volumeSvc := service.NewVolumeService(volumeRepo, vastaiAdapter)
 
 	rootCmd := &cobra.Command{
 		Use:           "mycodeagent",
@@ -71,6 +75,7 @@ func main() {
 		commands.NewLogCmd(app, vastaiClient),
 		commands.NewInfoCmd(app),
 		commands.NewConfigCmd(app),
+		commands.NewVolumeCmd(volumeSvc),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

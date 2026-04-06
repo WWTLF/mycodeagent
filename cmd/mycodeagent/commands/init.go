@@ -1,18 +1,57 @@
 package commands
 
 import (
+	"fmt"
+
 	"github.com/WWTLF/mycodeagent/internal/domain/service"
 	"github.com/spf13/cobra"
 )
 
 func NewInitCmd(deploySvc *service.DeployService) *cobra.Command {
-	return &cobra.Command{
+	var createOnly bool
+	var volumeID int64
+
+	cmd := &cobra.Command{
 		Use:   "init <model>",
 		Short: "Deploy a model on vast.ai",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := deploySvc.Deploy(args[0])
+			if createOnly {
+				result, err := deploySvc.DeployCreateOnly(args[0], volumeID)
+				if err != nil {
+					return err
+				}
+				inst := result.Instance
+
+				fmt.Println()
+				fmt.Println("Instance is running (no tunnel/health check).")
+				fmt.Println()
+				fmt.Printf("  Instance ID : %d\n", inst.VastaiID)
+				fmt.Printf("  Model       : %s\n", inst.ModelName)
+				fmt.Printf("  SSH Host    : %s\n", inst.SSHHost)
+				fmt.Printf("  SSH Port    : %d\n", inst.SSHPort)
+				fmt.Printf("  Rate        : $%.3f/hr\n", inst.HourlyRate)
+				fmt.Println()
+				fmt.Println("Connect via SSH:")
+				fmt.Printf("  ssh -p %d root@%s\n", inst.SSHPort, inst.SSHHost)
+				fmt.Println()
+				fmt.Println("Run vLLM on the instance:")
+				fmt.Printf("  %s\n", result.VLLMCommand)
+				fmt.Println()
+				fmt.Println("Set up SSH tunnel to vLLM (port 8000):")
+				fmt.Printf("  ssh -p %d root@%s -L 8080:localhost:8000\n", inst.SSHPort, inst.SSHHost)
+				fmt.Println()
+				fmt.Println("Once the tunnel is up, the API will be at: http://localhost:8080/v1")
+				return nil
+			}
+
+			_, err := deploySvc.Deploy(args[0], volumeID)
 			return err
 		},
 	}
+
+	cmd.Flags().BoolVar(&createOnly, "create-instance-only", false, "Create instance and show SSH details without setting up tunnel or waiting for vLLM")
+	cmd.Flags().Int64Var(&volumeID, "volume", 0, "Volume ID to attach (from 'volume list'); 0 = auto-select first available")
+
+	return cmd
 }

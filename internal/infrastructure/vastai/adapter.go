@@ -40,8 +40,8 @@ func (a *Adapter) SearchOffers(minGPURAM int, numGPUs int) ([]service.OfferResul
 	return results, nil
 }
 
-func (a *Adapter) CreateInstance(offerID int, image string, envVars map[string]string, onstart string) (int, error) {
-	resp, err := a.client.CreateInstance(offerID, image, envVars, onstart)
+func (a *Adapter) CreateInstance(offerID int, image string, envVars map[string]string, onstart string, volumeID int, mountPath string) (int, error) {
+	resp, err := a.client.CreateInstance(offerID, image, envVars, onstart, volumeID, mountPath)
 	if err != nil {
 		return 0, err
 	}
@@ -87,4 +87,59 @@ func (a *Adapter) StopInstance(instanceID int) error {
 
 func (a *Adapter) DestroyInstance(instanceID int) error {
 	return a.client.DestroyInstance(instanceID)
+}
+
+func (a *Adapter) SearchVolumeOffers(sizeGB int) ([]service.VolumeOfferResult, error) {
+	offers, err := a.client.SearchVolumeOffers(sizeGB)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]service.VolumeOfferResult, len(offers))
+	for i, o := range offers {
+		results[i] = service.VolumeOfferResult{
+			ID:        o.ID,
+			MachineID: o.MachineID,
+			Location:  o.Location,
+			DPHTotal:  o.DPHTotal,
+		}
+	}
+	return results, nil
+}
+
+func (a *Adapter) RentVolume(offerID int, sizeGB int) (*service.VolumeResult, error) {
+	resp, err := a.client.RentVolume(offerID, sizeGB)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("rent volume failed")
+	}
+	return &service.VolumeResult{
+		VolumeName: resp.VolumeName,
+	}, nil
+}
+
+func (a *Adapter) ListVolumes() ([]service.VolumeResult, error) {
+	volumes, err := a.client.ListVolumes()
+	if err != nil {
+		return nil, err
+	}
+	results := make([]service.VolumeResult, len(volumes))
+	for i, v := range volumes {
+		name := v.Label
+		if name == "" {
+			name = fmt.Sprintf("V.%d", v.ID)
+		}
+		results[i] = service.VolumeResult{
+			ID:         v.ID,
+			VolumeName: name,
+			SizeGB:     int(v.DiskSpace),
+			MachineID:  v.MachineID,
+		}
+	}
+	return results, nil
+}
+
+func (a *Adapter) DeleteVolume(volumeID int) error {
+	return a.client.DeleteVolume(volumeID)
 }

@@ -1,13 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "mycodeagent-12/Qwen/Qwen3-32B-AWQ",
+  "model": "mycodeagent-14/Qwen/Qwen3-32B-AWQ",
   "provider": {
-    "mycodeagent-12": {
+    "mycodeagent-14": {
       "models": {
         "Qwen/Qwen3-32B-AWQ": {
           "limit": {
             "context": 32768,
-            "output": 16384
+            "output": 8192
           },
           "name": "Qwen/Qwen3-32B-AWQ"
         }

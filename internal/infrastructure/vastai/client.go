@@ -81,6 +81,27 @@ type Invoice struct {
 	Rate        string `json:"rate"`
 }
 
+type VolumeOffer struct {
+	ID        int     `json:"id"`
+	MachineID int     `json:"machine_id"`
+	Location  string  `json:"geolocation"`
+	DPHTotal  float64 `json:"dph_total"`
+}
+
+type VolumeInfo struct {
+	ID        int     `json:"id"`
+	Label     string  `json:"label"`
+	MachineID int     `json:"machine_id"`
+	DiskSpace float64 `json:"disk_space"`
+	Status    string  `json:"status"`
+	Location  string  `json:"geolocation"`
+}
+
+type RentVolumeResponse struct {
+	Success    bool   `json:"success"`
+	VolumeName string `json:"volume_name"`
+}
+
 // ListSSHKeys returns SSH keys associated with the account.
 func (c *Client) ListSSHKeys() ([]map[string]any, error) {
 	url := fmt.Sprintf("%s/api/v0/ssh/", baseURL)
@@ -132,7 +153,8 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int) ([]Offer, error) {
 }
 
 // CreateInstance accepts an offer and creates a new instance.
-func (c *Client) CreateInstance(offerID int, image string, envVars map[string]string, onstart string) (*CreateInstanceResponse, error) {
+// If volumeID > 0, attaches the volume at mountPath.
+func (c *Client) CreateInstance(offerID int, image string, envVars map[string]string, onstart string, volumeID int, mountPath string) (*CreateInstanceResponse, error) {
 	url := fmt.Sprintf("%s/api/v0/asks/%d/", baseURL, offerID)
 
 	env := make(map[string]string)
@@ -147,6 +169,13 @@ func (c *Client) CreateInstance(offerID int, image string, envVars map[string]st
 		"disk":      40,
 		"onstart":   onstart,
 		"env":       env,
+	}
+
+	if volumeID > 0 && mountPath != "" {
+		body["volume_info"] = map[string]any{
+			"volume_id":  volumeID,
+			"mount_path": mountPath,
+		}
 	}
 
 	var resp CreateInstanceResponse
@@ -225,6 +254,55 @@ func (c *Client) GetInstanceLogs(instanceID int) (string, error) {
 	return "", fmt.Errorf("no log URL in response: %s", string(data))
 }
 
+// SearchVolumeOffers finds available volume offers.
+func (c *Client) SearchVolumeOffers(sizeGB int) ([]VolumeOffer, error) {
+	url := fmt.Sprintf("%s/api/v0/volumes/search/?limit=64", baseURL)
+	body := map[string]any{}
+	var result struct {
+		Offers []VolumeOffer `json:"offers"`
+	}
+	if err := c.doPost(url, body, &result); err != nil {
+		return nil, fmt.Errorf("search volume offers: %w", err)
+	}
+	return result.Offers, nil
+}
+
+// RentVolume rents a volume on the given offer with the specified size.
+func (c *Client) RentVolume(offerID int, sizeGB int) (*RentVolumeResponse, error) {
+	url := fmt.Sprintf("%s/api/v0/volumes/", baseURL)
+	body := map[string]any{
+		"id":   offerID,
+		"size": sizeGB,
+	}
+	var resp RentVolumeResponse
+	if err := c.doPut(url, body, &resp); err != nil {
+		return nil, fmt.Errorf("rent volume: %w", err)
+	}
+	return &resp, nil
+}
+
+// ListVolumes returns all user volumes.
+func (c *Client) ListVolumes() ([]VolumeInfo, error) {
+	url := fmt.Sprintf("%s/api/v0/volumes/", baseURL)
+	var wrapper struct {
+		Volumes []VolumeInfo `json:"volumes"`
+	}
+	if err := c.doGet(url, &wrapper); err != nil {
+		return nil, fmt.Errorf("list volumes: %w", err)
+	}
+	return wrapper.Volumes, nil
+}
+
+// DeleteVolume deletes a volume by ID.
+func (c *Client) DeleteVolume(volumeID int) error {
+	url := fmt.Sprintf("%s/api/v0/volumes/", baseURL)
+	body := map[string]any{"id": volumeID}
+	if err := c.doDeleteWithBody(url, body); err != nil {
+		return fmt.Errorf("delete volume %d: %w", volumeID, err)
+	}
+	return nil
+}
+
 // GetInvoices returns billing invoices.
 func (c *Client) GetInvoices() ([]Invoice, error) {
 	url := fmt.Sprintf("%s/api/v0/invoices", baseURL)
@@ -275,6 +353,19 @@ func (c *Client) doDelete(url string) error {
 	if err != nil {
 		return err
 	}
+	return c.doRequest(req, nil)
+}
+
+func (c *Client) doDeleteWithBody(url string, body any) error {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("DELETE", url, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	return c.doRequest(req, nil)
 }
 
