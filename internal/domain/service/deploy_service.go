@@ -47,10 +47,13 @@ type SSHTunnelProvider interface {
 }
 
 type OfferResult struct {
-	ID        int
-	GPUName   string
-	GPUMemory float64
-	DPHTotal  float64
+	ID            int
+	GPUName       string
+	GPUMemory     float64
+	DPHTotal      float64
+	MachineID     int
+	AvailVolAskID *int    // volume offer on this machine (nil if none)
+	AvailVolSize  float64 // available volume size in GB
 }
 
 type DeployService struct {
@@ -84,8 +87,8 @@ func NewDeployService(
 }
 
 // Deploy executes the full init flow: find offer → create instance → SSH → vLLM → tunnel.
-// If volumeDBID > 0, uses that specific volume; otherwise auto-selects the first available.
-func (s *DeployService) Deploy(modelName string, volumeDBID int64) (*entity.Instance, error) {
+// Unless noVolume is true, a volume is auto-created if none exists.
+func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instance, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -127,7 +130,11 @@ func (s *DeployService) Deploy(modelName string, volumeDBID int64) (*entity.Inst
 	}
 
 	// 3. Check for volume to attach
-	volumeID, mountPath := s.activeVolume(volumeDBID)
+	var volumeID int
+	var mountPath string
+	if !noVolume {
+		volumeID, mountPath = s.ensureVolume(offer)
+	}
 
 	// 4. Create instance
 	fmt.Println("Creating instance...")
@@ -137,7 +144,7 @@ func (s *DeployService) Deploy(modelName string, volumeDBID int64) (*entity.Inst
 	}
 	fmt.Printf("Instance created: %d\n", instanceID)
 
-	// 4. Wait for instance to be running
+	// 5. Wait for instance to be running
 	fmt.Println("Waiting for instance to start...")
 	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
 	if err != nil {
@@ -145,7 +152,7 @@ func (s *DeployService) Deploy(modelName string, volumeDBID int64) (*entity.Inst
 	}
 	fmt.Printf("Instance running: SSH at %s:%d\n", sshHost, sshPort)
 
-	// 5. Wait for SSH
+	// 6. Wait for SSH
 	fmt.Println("Waiting for SSH...")
 	if err := s.ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
 		return nil, fmt.Errorf("wait for SSH: %w", err)
@@ -163,23 +170,7 @@ func (s *DeployService) Deploy(modelName string, volumeDBID int64) (*entity.Inst
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}
 
-	// 7. Wait for vLLM health in a goroutine — stops as soon as healthy or context expires
-	fmt.Println("Waiting for vLLM to become healthy (model downloading, this may take a while)...")
-	healthCh := make(chan error, 1)
-	go func() {
-		healthCh <- s.ssh.WaitForVLLMHealth(ctx, localPort)
-	}()
-
-	select {
-	case err := <-healthCh:
-		if err != nil {
-			return nil, fmt.Errorf("vLLM health check: %w", err)
-		}
-	case <-ctx.Done():
-		return nil, fmt.Errorf("startup timed out after %s", timeout)
-	}
-
-	// 8. Save instance
+	// 7. Save instance now so ps/tunnel info is available even if health check times out
 	inst := &entity.Instance{
 		VastaiID:   int64(instanceID),
 		ModelName:  model.Name,
@@ -194,6 +185,22 @@ func (s *DeployService) Deploy(modelName string, volumeDBID int64) (*entity.Inst
 		return nil, fmt.Errorf("save instance: %w", err)
 	}
 
+	// 8. Wait for vLLM health in a goroutine — stops as soon as healthy or context expires
+	fmt.Println("Waiting for vLLM to become healthy (model downloading, this may take a while)...")
+	healthCh := make(chan error, 1)
+	go func() {
+		healthCh <- s.ssh.WaitForVLLMHealth(ctx, localPort)
+	}()
+
+	select {
+	case err := <-healthCh:
+		if err != nil {
+			return nil, fmt.Errorf("vLLM health check: %w", err)
+		}
+	case <-ctx.Done():
+		return nil, fmt.Errorf("startup timed out after %s (tunnel still running at localhost:%d)", timeout, localPort)
+	}
+
 	fmt.Printf("\nAPI available at: http://localhost:%d/v1\n", localPort)
 	return inst, nil
 }
@@ -205,7 +212,7 @@ type CreateOnlyResult struct {
 
 // DeployCreateOnly creates the instance and waits for it to be running, but does not
 // set up the SSH tunnel or wait for vLLM health. Returns the instance with SSH details.
-func (s *DeployService) DeployCreateOnly(modelName string, volumeDBID int64) (*CreateOnlyResult, error) {
+func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*CreateOnlyResult, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -244,7 +251,11 @@ func (s *DeployService) DeployCreateOnly(modelName string, volumeDBID int64) (*C
 	}
 
 	// 3. Check for volume to attach
-	volumeID, mountPath := s.activeVolume(volumeDBID)
+	var volumeID int
+	var mountPath string
+	if !noVolume {
+		volumeID, mountPath = s.ensureVolume(offer)
+	}
 
 	// 4. Create instance
 	fmt.Println("Creating instance...")
@@ -317,32 +328,89 @@ func (s *DeployService) Destroy(id int64) error {
 	return s.instances.Delete(inst.ID)
 }
 
-// activeVolume returns the volume ID and mount path.
-// If volumeDBID > 0, uses that specific volume; otherwise picks the first available.
-func (s *DeployService) activeVolume(volumeDBID int64) (int, string) {
-	vols, err := s.volumes.FindAll()
-	if err != nil || len(vols) == 0 {
+// RestartVLLM kills the running vLLM process and restarts it using /tmp/start_vllm.sh.
+func (s *DeployService) RestartVLLM(id int64) error {
+	inst, err := s.instances.FindByID(id)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Restarting vLLM on instance %d (%s)...\n", inst.ID, inst.ModelName)
+
+	killCmd := "pkill -f 'vllm serve' 2>/dev/null; sleep 2; pkill -9 -f 'vllm serve' 2>/dev/null; sleep 1"
+	fmt.Println("Killing vLLM...")
+	s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, killCmd)
+
+	startCmd := "nohup bash /tmp/start_vllm.sh 2>&1 | tee /tmp/vllm.log &"
+	fmt.Println("Starting vLLM...")
+	_, err = s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, startCmd)
+	if err != nil {
+		return fmt.Errorf("start vLLM: %w", err)
+	}
+
+	fmt.Println("vLLM restart initiated. Use 'mycodeagent log -f' to monitor.")
+	return nil
+}
+
+const defaultVolumeSizeGB = 50
+
+// ensureVolume returns the volume ID and mount path for the given offer's machine.
+// If no volume exists on that machine, it creates one using the offer's avail_vol_ask_id.
+func (s *DeployService) ensureVolume(offer OfferResult) (int, string) {
+	// Check if we already have a volume on this machine
+	vols, _ := s.volumes.FindAll()
+	for _, vol := range vols {
+		if vol.MachineID == offer.MachineID {
+			fmt.Printf("Attaching volume %d (%s) at %s\n", vol.ID, vol.VolumeName, vol.MountPath)
+			return int(vol.VastaiID), vol.MountPath
+		}
+	}
+
+	// No volume on this machine — create one
+	if offer.AvailVolAskID == nil {
+		fmt.Println("Warning: machine has no volume offer, proceeding without volume")
 		return 0, ""
 	}
 
-	var vol *entity.Volume
-	if volumeDBID > 0 {
-		for _, v := range vols {
-			if v.ID == volumeDBID {
-				vol = v
-				break
-			}
+	fmt.Printf("Creating volume (%d GB) on machine %d...\n", defaultVolumeSizeGB, offer.MachineID)
+	result, err := s.vastai.RentVolume(*offer.AvailVolAskID, defaultVolumeSizeGB)
+	if err != nil {
+		fmt.Printf("Warning: could not create volume: %v, proceeding without volume\n", err)
+		return 0, ""
+	}
+	fmt.Printf("Volume created: %s\n", result.VolumeName)
+
+	// Look up the actual volume ID from the API
+	remoteVols, err := s.vastai.ListVolumes()
+	if err != nil {
+		fmt.Printf("Warning: could not list volumes: %v, proceeding without volume\n", err)
+		return 0, ""
+	}
+	var vastaiID int
+	for _, rv := range remoteVols {
+		if rv.VolumeName == result.VolumeName {
+			vastaiID = rv.ID
+			break
 		}
-		if vol == nil {
-			fmt.Printf("Warning: volume %d not found, skipping\n", volumeDBID)
-			return 0, ""
-		}
-	} else {
-		vol = vols[0]
+	}
+	if vastaiID == 0 {
+		fmt.Println("Warning: volume created but not found in API listing, proceeding without volume")
+		return 0, ""
 	}
 
-	fmt.Printf("Attaching volume %s (ID %d) at %s\n", vol.VolumeName, vol.ID, vol.MountPath)
-	return int(vol.VastaiID), vol.MountPath
+	vol := &entity.Volume{
+		VastaiID:   int64(vastaiID),
+		VolumeName: result.VolumeName,
+		SizeGB:     defaultVolumeSizeGB,
+		MountPath:  defaultMountPath,
+		MachineID:  offer.MachineID,
+	}
+	if err := s.volumes.Save(vol); err != nil {
+		fmt.Printf("Warning: could not save volume locally: %v\n", err)
+	}
+
+	fmt.Printf("Attaching volume %d (%s) at %s\n", vol.ID, vol.VolumeName, vol.MountPath)
+	return vastaiID, defaultMountPath
 }
 
 func (s *DeployService) buildVLLMCommand(model *entity.Model) string {

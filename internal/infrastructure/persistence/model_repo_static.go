@@ -10,23 +10,22 @@ import (
 
 var defaultModels = []*entity.Model{
 	{
-		Name:        "qwen3-32b-awq",
-		Alias:       "coder",
-		HFRepo:      "Qwen/Qwen3-32B-AWQ",
-		Category:    entity.CategoryCoding,
-		VRAM:        32,
-		NumGPUs:     1,
+		Name:           "qwen3-5-35b-a3b-instruct",
+		Alias:          "coder",
+		HFRepo:         "Qwen/Qwen3.5-35B-A3B",
+		Category:       entity.CategoryCoding,
+		VRAM:           48,
+		NumGPUs:        1,
 		Temperature:    0.1,
-		StartupTimeout: 10 * time.Minute,
+		StartupTimeout: 20 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
-			"--quantization", "awq_marlin",
-			"--dtype", "half",
 			"--enable-auto-tool-choice",
 			"--tool-call-parser", "hermes",
 			"--reasoning-parser", "deepseek_r1",
 			"--gpu-memory-utilization", "0.95",
 			"--trust-remote-code",
+			"--enable-prefix-caching",
 		},
 	},
 	{

@@ -99,6 +99,17 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 			cfg["provider"] = providers
 			cfg["model"] = defaultModel
 
+			// Add Go LSP (gopls)
+			lsp, _ := cfg["lsp"].(map[string]any)
+			if lsp == nil {
+				lsp = make(map[string]any)
+			}
+			lsp["golang"] = map[string]any{
+				"command": "gopls",
+				"args":    []string{"serve"},
+			}
+			cfg["lsp"] = lsp
+
 			out, err := json.MarshalIndent(cfg, "", "  ")
 			if err != nil {
 				return fmt.Errorf("marshal config: %w", err)

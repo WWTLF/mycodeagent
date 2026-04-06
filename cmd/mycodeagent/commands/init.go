@@ -9,15 +9,15 @@ import (
 
 func NewInitCmd(deploySvc *service.DeployService) *cobra.Command {
 	var createOnly bool
-	var volumeID int64
+	var noVolume bool
 
 	cmd := &cobra.Command{
 		Use:   "init <model>",
-		Short: "Deploy a model on vast.ai",
+		Short: "Deploy a model on vast.ai (--no-volume, --create-instance-only)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if createOnly {
-				result, err := deploySvc.DeployCreateOnly(args[0], volumeID)
+				result, err := deploySvc.DeployCreateOnly(args[0], noVolume)
 				if err != nil {
 					return err
 				}
@@ -45,13 +45,13 @@ func NewInitCmd(deploySvc *service.DeployService) *cobra.Command {
 				return nil
 			}
 
-			_, err := deploySvc.Deploy(args[0], volumeID)
+			_, err := deploySvc.Deploy(args[0], noVolume)
 			return err
 		},
 	}
 
 	cmd.Flags().BoolVar(&createOnly, "create-instance-only", false, "Create instance and show SSH details without setting up tunnel or waiting for vLLM")
-	cmd.Flags().Int64Var(&volumeID, "volume", 0, "Volume ID to attach (from 'volume list'); 0 = auto-select first available")
+	cmd.Flags().BoolVar(&noVolume, "no-volume", false, "Do not attach a persistent volume (skips auto-create)")
 
 	return cmd
 }

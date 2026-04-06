@@ -31,10 +31,13 @@ func (a *Adapter) SearchOffers(minGPURAM int, numGPUs int) ([]service.OfferResul
 	results := make([]service.OfferResult, len(offers))
 	for i, o := range offers {
 		results[i] = service.OfferResult{
-			ID:        o.ID,
-			GPUName:   o.GPUName,
-			GPUMemory: o.GPUMemory,
-			DPHTotal:  o.DPHTotal,
+			ID:            o.ID,
+			GPUName:       o.GPUName,
+			GPUMemory:     o.GPUMemory,
+			DPHTotal:      o.DPHTotal,
+			MachineID:     o.MachineID,
+			AvailVolAskID: o.AvailVolAskID,
+			AvailVolSize:  o.AvailVolSize,
 		}
 	}
 	return results, nil

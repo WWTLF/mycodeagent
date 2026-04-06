@@ -94,7 +94,7 @@ func (s *VolumeService) Delete(id int64) error {
 	for _, vol := range vols {
 		if vol.ID == id {
 			if err := s.vastai.DeleteVolume(int(vol.VastaiID)); err != nil {
-				return fmt.Errorf("delete volume from vast.ai: %w", err)
+				fmt.Printf("Warning: failed to delete volume from vast.ai: %v (removing local record anyway)\n", err)
 			}
 			return s.volumes.Delete(id)
 		}

@@ -75,6 +75,7 @@ func main() {
 		commands.NewLogCmd(app, vastaiClient),
 		commands.NewInfoCmd(app),
 		commands.NewConfigCmd(app),
+		commands.NewRestartCmd(deploySvc),
 		commands.NewVolumeCmd(volumeSvc),
 	)
 

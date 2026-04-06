@@ -32,12 +32,15 @@ func (c *Client) SetVerbose(v bool) {
 }
 
 type Offer struct {
-	ID          int     `json:"id"`
-	GPUName     string  `json:"gpu_name"`
-	NumGPUs     int     `json:"num_gpus"`
-	GPUMemory   float64 `json:"gpu_ram"`
-	DPHTotal    float64 `json:"dph_total"` // dollars per hour
-	Reliability float64 `json:"reliability"`
+	ID             int     `json:"id"`
+	GPUName        string  `json:"gpu_name"`
+	NumGPUs        int     `json:"num_gpus"`
+	GPUMemory      float64 `json:"gpu_ram"`
+	DPHTotal       float64 `json:"dph_total"` // dollars per hour
+	Reliability    float64 `json:"reliability"`
+	MachineID      int     `json:"machine_id"`
+	AvailVolAskID  *int    `json:"avail_vol_ask_id"`
+	AvailVolSize   float64 `json:"avail_vol_size"`
 }
 
 type InstanceInfo struct {
@@ -234,22 +237,19 @@ func (c *Client) DestroyInstance(instanceID int) error {
 }
 
 // GetInstanceLogs requests logs for an instance. Returns a URL to download them.
-func (c *Client) GetInstanceLogs(instanceID int) (string, error) {
-	url := fmt.Sprintf("%s/api/v1/instances/%d/logs/", baseURL, instanceID)
+func (c *Client) GetInstanceLogs(instanceID int, tail string) (string, error) {
+	url := fmt.Sprintf("%s/api/v0/instances/request_logs/%d/", baseURL, instanceID)
+	body := map[string]any{}
+	if tail != "" {
+		body["tail"] = tail
+	}
 	var result map[string]any
-	if err := c.doGet(url, &result); err != nil {
+	if err := c.doPut(url, body, &result); err != nil {
 		return "", fmt.Errorf("get logs for instance %d: %w", instanceID, err)
 	}
-	if logURL, ok := result["log_url"].(string); ok {
+	if logURL, ok := result["result_url"].(string); ok {
 		return logURL, nil
 	}
-	// Try alternate field names
-	for _, key := range []string{"url", "logs_url", "s3_url"} {
-		if v, ok := result[key].(string); ok {
-			return v, nil
-		}
-	}
-	// Return raw response for debugging
 	data, _ := json.Marshal(result)
 	return "", fmt.Errorf("no log URL in response: %s", string(data))
 }

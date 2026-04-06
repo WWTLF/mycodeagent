@@ -86,13 +86,15 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tMODEL\tTUNNEL URL")
-			fmt.Fprintln(w, "--\t-------\t------\t-----\t----------")
+			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tMODEL\tHEALTH\tTUNNEL URL")
+			fmt.Fprintln(w, "--\t-------\t------\t-----\t------\t----------")
 
 			for _, inst := range localInstances {
 				tunnelURL := "-"
+				health := "-"
 				if inst.LocalPort > 0 {
 					tunnelURL = fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
+					health = checkHealth(inst.LocalPort)
 				}
 
 				// Try to detect model via vLLM API if unknown and tunnel is up
@@ -103,12 +105,25 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 					}
 				}
 
-				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\n",
-					inst.ID, inst.VastaiID, inst.Status, inst.ModelName, tunnelURL)
+				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\n",
+					inst.ID, inst.VastaiID, inst.Status, inst.ModelName, health, tunnelURL)
 			}
 			return w.Flush()
 		},
 	}
+}
+
+func checkHealth(localPort int) string {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/health", localPort))
+	if err != nil {
+		return "unreachable"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		return "healthy"
+	}
+	return fmt.Sprintf("unhealthy (%d)", resp.StatusCode)
 }
 
 func detectModelFromOnstart(onstart string, app *application.App) string {

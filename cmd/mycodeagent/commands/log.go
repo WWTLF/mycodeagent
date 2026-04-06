@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"time"
 
@@ -15,8 +14,7 @@ import (
 )
 
 func NewLogCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command {
-	var follow bool
-	var useSSH bool
+	var tail string
 
 	cmd := &cobra.Command{
 		Use:   "log <id>",
@@ -33,53 +31,35 @@ func NewLogCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command
 				return err
 			}
 
-			// Try REST API first (works without SSH)
-			if !useSSH && !follow {
-				logURL, err := vastaiClient.GetInstanceLogs(int(inst.VastaiID))
-				if err == nil && logURL != "" {
-					fmt.Fprintf(os.Stderr, "Fetching logs from vast.ai...\n")
-					client := &http.Client{Timeout: 30 * time.Second}
-					resp, err := client.Get(logURL)
-					if err == nil {
-						defer resp.Body.Close()
-						io.Copy(os.Stdout, resp.Body)
-						return nil
-					}
-				}
-				// Fall through to SSH
-			}
-
-			// SSH fallback
-			remote, err := vastaiClient.GetInstance(int(inst.VastaiID))
+			logURL, err := vastaiClient.GetInstanceLogs(int(inst.VastaiID), tail)
 			if err != nil {
-				return fmt.Errorf("fetch instance: %w", err)
+				return err
 			}
 
-			sshHost := remote.SSHHost
-			if sshHost == "" {
-				sshHost = remote.PublicIPAddr
-			}
-			sshPort := remote.GetSSHPort()
+			fmt.Fprintf(os.Stderr, "Requesting logs from vast.ai...\n")
+			client := &http.Client{Timeout: 30 * time.Second}
 
-			tailCmd := "tail -50 /tmp/vllm.log 2>/dev/null || echo 'No vLLM log found'"
-			if follow {
-				tailCmd = "tail -f /tmp/vllm.log 2>/dev/null || echo 'No vLLM log found'"
+			// S3 upload takes a few seconds; retry until available
+			for attempt := 0; attempt < 10; attempt++ {
+				if attempt > 0 {
+					time.Sleep(2 * time.Second)
+				}
+				resp, err := client.Get(logURL)
+				if err != nil {
+					return fmt.Errorf("fetch log URL: %w", err)
+				}
+				if resp.StatusCode == 200 {
+					io.Copy(os.Stdout, resp.Body)
+					resp.Body.Close()
+					return nil
+				}
+				resp.Body.Close()
+				fmt.Fprintf(os.Stderr, "  waiting for logs...\n")
 			}
-
-			sshCmd := exec.Command("ssh",
-				"-o", "StrictHostKeyChecking=no",
-				"-o", "ConnectTimeout=10",
-				"-p", fmt.Sprintf("%d", sshPort),
-				fmt.Sprintf("root@%s", sshHost),
-				tailCmd,
-			)
-			sshCmd.Stdout = os.Stdout
-			sshCmd.Stderr = os.Stderr
-			return sshCmd.Run()
+			return fmt.Errorf("logs not available after retries")
 		},
 	}
 
-	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output (like tail -f, SSH only)")
-	cmd.Flags().BoolVar(&useSSH, "ssh", false, "Force SSH instead of REST API")
+	cmd.Flags().StringVarP(&tail, "tail", "n", "100", "Number of lines to show from end of logs")
 	return cmd
 }

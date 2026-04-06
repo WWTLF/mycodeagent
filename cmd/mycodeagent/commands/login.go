@@ -68,29 +68,46 @@ func NewLoginCmd() *cobra.Command {
 				client.SetVerbose(verbose)
 
 				keys, err := client.ListSSHKeys()
-				if err == nil && len(keys) == 0 {
-					fmt.Println("===================================================================")
-					fmt.Println("No SSH key found on your vast.ai account.")
+				if err == nil {
 					pubKey := findSSHPubKey()
-					if pubKey != "" {
-						fmt.Printf("Found local key: %s...%s\n", pubKey[:20], pubKey[len(pubKey)-20:])
-						fmt.Print("Upload to vast.ai? [Y/n]: ")
-						answer, _ := reader.ReadString('\n')
-						answer = strings.TrimSpace(strings.ToLower(answer))
-						if answer == "" || answer == "y" || answer == "yes" {
-							if err := client.CreateSSHKey(pubKey); err != nil {
-								fmt.Printf("Failed to upload SSH key: %v\n", err)
-							} else {
-								fmt.Println("SSH key uploaded.")
-							}
-						}
-					} else {
+					if pubKey == "" {
 						fmt.Println("No SSH key found at ~/.ssh/id_*.pub")
 						fmt.Println("Generate one with: ssh-keygen -t ed25519")
 						fmt.Println("Then run 'mycodeagent login' again.")
+					} else {
+						// Check if local key is already uploaded
+						localKeyFields := strings.Fields(pubKey)
+						localKeyData := ""
+						if len(localKeyFields) >= 2 {
+							localKeyData = localKeyFields[1]
+						}
+						found := false
+						for _, k := range keys {
+							if pk, ok := k["public_key"].(string); ok {
+								if fields := strings.Fields(pk); len(fields) >= 2 && fields[1] == localKeyData {
+									found = true
+									break
+								}
+							}
+						}
+						if found {
+							fmt.Printf("SSH key: already uploaded (%d key(s) on vast.ai)\n", len(keys))
+						} else {
+							fmt.Println("===================================================================")
+							fmt.Printf("Local key not found on vast.ai (%d key(s) exist).\n", len(keys))
+							fmt.Printf("Found local key: %s...%s\n", pubKey[:20], pubKey[len(pubKey)-20:])
+							fmt.Print("Upload to vast.ai? [Y/n]: ")
+							answer, _ := reader.ReadString('\n')
+							answer = strings.TrimSpace(strings.ToLower(answer))
+							if answer == "" || answer == "y" || answer == "yes" {
+								if err := client.CreateSSHKey(pubKey); err != nil {
+									fmt.Printf("Failed to upload SSH key: %v\n", err)
+								} else {
+									fmt.Println("SSH key uploaded.")
+								}
+							}
+						}
 					}
-				} else if err == nil {
-					fmt.Printf("SSH key: already configured (%d key(s) on vast.ai)\n", len(keys))
 				}
 			}
 
