@@ -46,6 +46,8 @@ Dependencies point inward: Infrastructure → Domain ← Application. Domain has
 - Each `init` allocates a new local port to allow multiple concurrent models
 - State persisted in `~/.mycodeagent/sqlite`
 
+@docs/Solution.md
+
 ## Build & Run
 
 ```bash

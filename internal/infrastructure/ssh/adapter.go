@@ -1,6 +1,8 @@
 package ssh
 
 import (
+	"context"
+
 	"github.com/WWTLF/mycodeagent/internal/domain/service"
 )
 
@@ -25,8 +27,8 @@ func (a *Adapter) StopTunnel(pid int) error {
 	return StopTunnel(pid)
 }
 
-func (a *Adapter) WaitForSSH(host string, port int) error {
-	return WaitForSSH(host, port, 24)
+func (a *Adapter) WaitForSSH(ctx context.Context, host string, port int) error {
+	return WaitForSSH(ctx, host, port)
 }
 
 func (a *Adapter) RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error) {
@@ -37,6 +39,6 @@ func (a *Adapter) FindFreePort(basePort int) (int, error) {
 	return FindFreePort(basePort)
 }
 
-func (a *Adapter) WaitForVLLMHealth(localPort int) error {
-	return WaitForVLLMHealth(localPort, 60)
+func (a *Adapter) WaitForVLLMHealth(ctx context.Context, localPort int) error {
+	return WaitForVLLMHealth(ctx, localPort)
 }

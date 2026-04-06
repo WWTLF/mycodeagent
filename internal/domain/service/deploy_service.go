@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/WWTLF/mycodeagent/internal/domain/repository"
@@ -11,7 +13,7 @@ import (
 type VastaiProvider interface {
 	SearchOffers(minGPURAM int, numGPUs int) ([]OfferResult, error)
 	CreateInstance(offerID int, image string, envVars map[string]string, onstart string) (instanceID int, err error)
-	WaitForInstance(instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error)
+	WaitForInstance(ctx context.Context, instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error)
 	StopInstance(instanceID int) error
 	DestroyInstance(instanceID int) error
 }
@@ -20,10 +22,10 @@ type VastaiProvider interface {
 type SSHTunnelProvider interface {
 	StartTunnel(localPort int, sshHost string, sshPort int) (pid int, err error)
 	StopTunnel(pid int) error
-	WaitForSSH(host string, port int) error
+	WaitForSSH(ctx context.Context, host string, port int) error
 	RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error)
 	FindFreePort(basePort int) (int, error)
-	WaitForVLLMHealth(localPort int) error
+	WaitForVLLMHealth(ctx context.Context, localPort int) error
 }
 
 type OfferResult struct {
@@ -67,6 +69,16 @@ func (s *DeployService) Deploy(modelName string) (*entity.Instance, error) {
 		return nil, err
 	}
 
+	// Use model's startup timeout, default to 10 minutes
+	timeout := model.StartupTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	fmt.Printf("Startup timeout: %s\n", timeout)
+
 	// 1. Find cheapest offer
 	numGPUs := model.NumGPUs
 	if numGPUs <= 0 {
@@ -102,7 +114,7 @@ func (s *DeployService) Deploy(modelName string) (*entity.Instance, error) {
 
 	// 4. Wait for instance to be running
 	fmt.Println("Waiting for instance to start...")
-	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(instanceID)
+	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
@@ -110,7 +122,7 @@ func (s *DeployService) Deploy(modelName string) (*entity.Instance, error) {
 
 	// 5. Wait for SSH
 	fmt.Println("Waiting for SSH...")
-	if err := s.ssh.WaitForSSH(sshHost, sshPort); err != nil {
+	if err := s.ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
 
@@ -126,10 +138,20 @@ func (s *DeployService) Deploy(modelName string) (*entity.Instance, error) {
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}
 
-	// 7. Wait for vLLM health
+	// 7. Wait for vLLM health in a goroutine — stops as soon as healthy or context expires
 	fmt.Println("Waiting for vLLM to become healthy (model downloading, this may take a while)...")
-	if err := s.ssh.WaitForVLLMHealth(localPort); err != nil {
-		return nil, fmt.Errorf("vLLM health check: %w", err)
+	healthCh := make(chan error, 1)
+	go func() {
+		healthCh <- s.ssh.WaitForVLLMHealth(ctx, localPort)
+	}()
+
+	select {
+	case err := <-healthCh:
+		if err != nil {
+			return nil, fmt.Errorf("vLLM health check: %w", err)
+		}
+	case <-ctx.Done():
+		return nil, fmt.Errorf("startup timed out after %s", timeout)
 	}
 
 	// 8. Save instance

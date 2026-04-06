@@ -1,6 +1,7 @@
 package vastai
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -54,14 +55,13 @@ func (a *Adapter) CreateInstance(offerID int, image string, envVars map[string]s
 	return int(id), nil
 }
 
-func (a *Adapter) WaitForInstance(instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error) {
-	for i := 0; i < 30; i++ {
+func (a *Adapter) WaitForInstance(ctx context.Context, instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for i := 1; ; i++ {
 		inst, err := a.client.GetInstance(instanceID)
-		if err != nil {
-			time.Sleep(10 * time.Second)
-			continue
-		}
-		if inst.ActualStatus == "running" {
+		if err == nil && inst.ActualStatus == "running" {
 			host := inst.SSHHost
 			if host == "" {
 				host = inst.PublicIPAddr
@@ -69,10 +69,16 @@ func (a *Adapter) WaitForInstance(instanceID int) (sshHost string, sshPort int, 
 			port := inst.GetSSHPort()
 			return host, port, inst.DPHTotal, nil
 		}
-		fmt.Printf("  [%d/30] Status: %s\n", i+1, inst.ActualStatus)
-		time.Sleep(10 * time.Second)
+		if err == nil {
+			fmt.Printf("  [%d] Status: %s\n", i, inst.ActualStatus)
+		}
+
+		select {
+		case <-ctx.Done():
+			return "", 0, 0, fmt.Errorf("instance %d did not start: %w", instanceID, ctx.Err())
+		case <-ticker.C:
+		}
 	}
-	return "", 0, 0, fmt.Errorf("instance %d did not start within timeout", instanceID)
 }
 
 func (a *Adapter) StopInstance(instanceID int) error {

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -55,7 +56,9 @@ func NewTunnelCmd(app *application.App, vastaiClient *vastai.Client, basePort in
 
 			// Wait for SSH
 			fmt.Printf("Connecting to %s:%d...\n", sshHost, sshPort)
-			if err := ssh.WaitForSSH(sshHost, sshPort, 12); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
 				return fmt.Errorf("SSH not reachable: %w", err)
 			}
 

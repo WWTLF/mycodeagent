@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/WWTLF/mycodeagent/internal/domain/repository"
@@ -15,7 +16,8 @@ var defaultModels = []*entity.Model{
 		Category:    entity.CategoryCoding,
 		VRAM:        32,
 		NumGPUs:     1,
-		Temperature: 0.1,
+		Temperature:    0.1,
+		StartupTimeout: 10 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
 			"--quantization", "awq_marlin",
@@ -28,13 +30,14 @@ var defaultModels = []*entity.Model{
 		},
 	},
 	{
-		Name:        "qwen3-vl-32b-instruct-awq",
-		Alias:       "coder_vl",
-		HFRepo:      "QuantTrio/Qwen3-VL-32B-Instruct-AWQ",
-		Category:    entity.CategoryCoding,
-		VRAM:        24,
-		NumGPUs:     2,
-		Temperature: 0.2,
+		Name:           "qwen3-vl-32b-instruct-awq",
+		Alias:          "coder_vl",
+		HFRepo:         "QuantTrio/Qwen3-VL-32B-Instruct-AWQ",
+		Category:       entity.CategoryCoding,
+		VRAM:           24,
+		NumGPUs:        2,
+		Temperature:    0.2,
+		StartupTimeout: 15 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
 			"--quantization", "awq",
@@ -45,13 +48,14 @@ var defaultModels = []*entity.Model{
 		},
 	},
 	{
-		Name:        "qwen25-32b-instruct-awq",
-		Alias:       "writer",
-		HFRepo:      "Qwen/Qwen2.5-32B-Instruct-AWQ",
-		Category:    entity.CategoryFiction,
-		VRAM:        24,
-		NumGPUs:     2,
-		Temperature: 0.7,
+		Name:           "qwen25-32b-instruct-awq",
+		Alias:          "writer",
+		HFRepo:         "Qwen/Qwen2.5-32B-Instruct-AWQ",
+		Category:       entity.CategoryFiction,
+		VRAM:           24,
+		NumGPUs:        2,
+		Temperature:    0.7,
+		StartupTimeout: 15 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
 			"--quantization", "awq",
@@ -62,13 +66,14 @@ var defaultModels = []*entity.Model{
 		},
 	},
 	{
-		Name:        "dolphin-glm-24b",
-		Alias:       "rude",
-		HFRepo:      "DavidAU/Dolphin-Mistral-GLM-4.7-Flash-24B-Venice-Edition-Thinking-Uncensored",
-		Category:    entity.CategoryDolphin,
-		VRAM:        24,
-		NumGPUs:     2,
-		Temperature: 1.1,
+		Name:           "dolphin-glm-24b",
+		Alias:          "rude",
+		HFRepo:         "DavidAU/Dolphin-Mistral-GLM-4.7-Flash-24B-Venice-Edition-Thinking-Uncensored",
+		Category:       entity.CategoryDolphin,
+		VRAM:           24,
+		NumGPUs:        2,
+		Temperature:    1.1,
+		StartupTimeout: 15 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
 			"--tensor-parallel-size", "2",

@@ -1,5 +1,7 @@
 package entity
 
+import "time"
+
 type ModelCategory string
 
 const (
@@ -15,6 +17,7 @@ type Model struct {
 	Category    ModelCategory
 	VRAM        int     // GB required per GPU
 	NumGPUs     int     // number of GPUs needed (0 or 1 = single GPU)
-	Temperature float64 // default serving temperature
-	VLLMArgs    []string
+	Temperature    float64       // default serving temperature
+	StartupTimeout time.Duration // max time to wait for instance + vLLM to become healthy
+	VLLMArgs       []string
 }

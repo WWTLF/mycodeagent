@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -67,26 +68,35 @@ func StopTunnel(pid int) error {
 	return syscall.Kill(pid, syscall.SIGTERM)
 }
 
-// WaitForSSH waits until SSH is reachable on the given host:port.
-func WaitForSSH(host string, port int, maxAttempts int) error {
+// WaitForSSH waits until SSH is reachable on the given host:port, respecting context deadline.
+func WaitForSSH(ctx context.Context, host string, port int) error {
 	addr := fmt.Sprintf("%s:%d", host, port)
-	for i := 0; i < maxAttempts; i++ {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
 		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 		if err == nil {
 			conn.Close()
 			return nil
 		}
-		time.Sleep(5 * time.Second)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("SSH not reachable at %s: %w", addr, ctx.Err())
+		case <-ticker.C:
+		}
 	}
-	return fmt.Errorf("SSH not reachable at %s after %d attempts", addr, maxAttempts)
 }
 
-// WaitForVLLMHealth waits until vLLM health endpoint responds via the local tunnel.
-func WaitForVLLMHealth(localPort int, maxAttempts int) error {
+// WaitForVLLMHealth waits until vLLM health endpoint responds via the local tunnel, respecting context deadline.
+func WaitForVLLMHealth(ctx context.Context, localPort int) error {
 	url := fmt.Sprintf("http://localhost:%d/health", localPort)
 	client := &http.Client{Timeout: 5 * time.Second}
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 
-	for i := 0; i < maxAttempts; i++ {
+	for {
 		resp, err := client.Get(url)
 		if err == nil {
 			resp.Body.Close()
@@ -94,9 +104,13 @@ func WaitForVLLMHealth(localPort int, maxAttempts int) error {
 				return nil
 			}
 		}
-		time.Sleep(10 * time.Second)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("vLLM not healthy at port %d: %w", localPort, ctx.Err())
+		case <-ticker.C:
+		}
 	}
-	return fmt.Errorf("vLLM not healthy at port %d after %d attempts", localPort, maxAttempts)
 }
 
 // RunRemoteCommand executes a command on the remote instance via SSH.
