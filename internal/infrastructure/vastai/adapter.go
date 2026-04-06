@@ -28,9 +28,12 @@ func (a *Adapter) SearchOffers(minGPURAM int, numGPUs int) ([]service.OfferResul
 	if err != nil {
 		return nil, err
 	}
-	results := make([]service.OfferResult, len(offers))
-	for i, o := range offers {
-		results[i] = service.OfferResult{
+	var results []service.OfferResult
+	for _, o := range offers {
+		if o.Verification == "deverified" {
+			continue
+		}
+		results = append(results, service.OfferResult{
 			ID:            o.ID,
 			GPUName:       o.GPUName,
 			GPUMemory:     o.GPUMemory,
@@ -38,7 +41,7 @@ func (a *Adapter) SearchOffers(minGPURAM int, numGPUs int) ([]service.OfferResul
 			MachineID:     o.MachineID,
 			AvailVolAskID: o.AvailVolAskID,
 			AvailVolSize:  o.AvailVolSize,
-		}
+		})
 	}
 	return results, nil
 }
@@ -58,12 +61,25 @@ func (a *Adapter) CreateInstance(offerID int, image string, envVars map[string]s
 	return int(id), nil
 }
 
-func (a *Adapter) WaitForInstance(ctx context.Context, instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error) {
+func (a *Adapter) WaitForInstance(ctx context.Context, instanceID int, volumeID int) (sshHost string, sshPort int, hourlyRate float64, err error) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for i := 1; ; i++ {
 		inst, err := a.client.GetInstance(instanceID)
+		if err == nil && inst.Verification == "deverified" {
+			fmt.Printf("  [%d] Instance deverified — destroying instance %d\n", i, instanceID)
+			_ = a.client.DestroyInstance(instanceID)
+			return "", 0, 0, fmt.Errorf("instance %d was deverified and has been destroyed", instanceID)
+		}
+		// Check volume still exists via API
+		if err == nil && volumeID > 0 {
+			if !a.volumeExists(volumeID) {
+				fmt.Printf("  [%d] Volume V.%d no longer exists — destroying instance %d\n", i, volumeID, instanceID)
+				_ = a.client.DestroyInstance(instanceID)
+				return "", 0, 0, fmt.Errorf("volume V.%d was deleted — destroyed instance %d, retry init", volumeID, instanceID)
+			}
+		}
 		if err == nil && inst.ActualStatus == "running" {
 			host := inst.SSHHost
 			if host == "" {
@@ -72,8 +88,28 @@ func (a *Adapter) WaitForInstance(ctx context.Context, instanceID int) (sshHost 
 			port := inst.GetSSHPort()
 			return host, port, inst.DPHTotal, nil
 		}
+		// Detect terminal failure: instance stopped/exited unexpectedly or has an error message
+		if err == nil && (inst.CurState == "stopped" || inst.CurState == "exited" || inst.IntendedStatus == "stopped") {
+			msg := inst.StatusMsg
+			if msg == "" {
+				msg = fmt.Sprintf("cur_state=%s, intended_status=%s", inst.CurState, inst.IntendedStatus)
+			}
+			return "", 0, 0, fmt.Errorf("instance %d failed to start: %s", instanceID, msg)
+		}
 		if err == nil {
-			fmt.Printf("  [%d] Status: %s\n", i, inst.ActualStatus)
+			status := inst.ActualStatus
+			if inst.StatusMsg != "" {
+				status = fmt.Sprintf("%s (%s)", status, inst.StatusMsg)
+			}
+			volStatus := ""
+			if volumeID > 0 {
+				if inst.HasVolume(volumeID) {
+					volStatus = fmt.Sprintf(" | volume V.%d: attached", volumeID)
+				} else {
+					volStatus = fmt.Sprintf(" | volume V.%d: MISSING", volumeID)
+				}
+			}
+			fmt.Printf("  [%d] Status: %s%s\n", i, status, volStatus)
 		}
 
 		select {

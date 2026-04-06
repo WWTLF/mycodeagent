@@ -89,9 +89,9 @@ func WaitForSSH(ctx context.Context, host string, port int) error {
 	}
 }
 
-// WaitForVLLMHealth waits until vLLM health endpoint responds via the local tunnel, respecting context deadline.
+// WaitForVLLMHealth waits until the model server responds via the local tunnel, respecting context deadline.
 func WaitForVLLMHealth(ctx context.Context, localPort int) error {
-	url := fmt.Sprintf("http://localhost:%d/health", localPort)
+	url := fmt.Sprintf("http://localhost:%d/v1/models", localPort)
 	client := &http.Client{Timeout: 5 * time.Second}
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()

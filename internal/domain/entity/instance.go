@@ -21,5 +21,6 @@ type Instance struct {
 	SSHPort    int
 	TunnelPID  int
 	HourlyRate float64
+	VolumeID   int64
 	CreatedAt  time.Time
 }

@@ -10,16 +10,18 @@ import (
 
 var defaultModels = []*entity.Model{
 	{
-		Name:           "qwen3-5-35b-a3b-instruct",
+		Name:           "qwen3-5-35b-a3b-awq",
 		Alias:          "coder",
-		HFRepo:         "Qwen/Qwen3.5-35B-A3B",
+		HFRepo:         "QuantTrio/Qwen3.5-35B-A3B-AWQ",
 		Category:       entity.CategoryCoding,
-		VRAM:           48,
-		NumGPUs:        1,
-		Temperature:    0.1,
+		VRAM:           24,
+		NumGPUs:        2,
 		StartupTimeout: 20 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
+			"--quantization", "awq",
+			"--dtype", "half",
+			"--tensor-parallel-size", "2",
 			"--enable-auto-tool-choice",
 			"--tool-call-parser", "hermes",
 			"--reasoning-parser", "deepseek_r1",
@@ -35,7 +37,6 @@ var defaultModels = []*entity.Model{
 		Category:       entity.CategoryCoding,
 		VRAM:           24,
 		NumGPUs:        2,
-		Temperature:    0.2,
 		StartupTimeout: 15 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
@@ -53,7 +54,6 @@ var defaultModels = []*entity.Model{
 		Category:       entity.CategoryFiction,
 		VRAM:           24,
 		NumGPUs:        2,
-		Temperature:    0.7,
 		StartupTimeout: 15 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
@@ -71,7 +71,6 @@ var defaultModels = []*entity.Model{
 		Category:       entity.CategoryDolphin,
 		VRAM:           24,
 		NumGPUs:        2,
-		Temperature:    1.1,
 		StartupTimeout: 15 * time.Minute,
 		VLLMArgs: []string{
 			"--max-model-len", "32768",
@@ -79,6 +78,17 @@ var defaultModels = []*entity.Model{
 			"--gpu-memory-utilization", "0.95",
 			"--trust-remote-code",
 		},
+	},
+	{
+		Name:           "qwen25-coder-32b-gguf",
+		Alias:          "coder-2",
+		HFRepo:         "bartowski/Qwen2.5-Coder-32B-Instruct-GGUF",
+		Category:       entity.CategoryCoding,
+		VRAM:           24,
+		NumGPUs:        1,
+		StartupTimeout: 15 * time.Minute,
+		Engine:         entity.EngineLMStudio,
+		GGUFFile:       "Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
 	},
 }
 

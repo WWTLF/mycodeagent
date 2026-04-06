@@ -45,7 +45,15 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 				}
 				seen[local.VastaiID] = true
 				// Update status and SSH info from remote, preserve tunnel info
-				local.Status = entity.InstanceStatus(remote.ActualStatus)
+				// Prefer cur_state over actual_status when they disagree
+				status := remote.ActualStatus
+				if remote.CurState == "stopped" || remote.CurState == "exited" {
+					status = remote.CurState
+				}
+				if remote.StatusMsg != "" {
+					status = fmt.Sprintf("%s (%s)", status, remote.StatusMsg)
+				}
+				local.Status = entity.InstanceStatus(status)
 				if remote.SSHHost != "" {
 					local.SSHHost = remote.SSHHost
 				}
@@ -66,10 +74,17 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 				vastID := int64(ri.ID)
 				if !localVastIDs[vastID] {
 					modelName := detectModelFromOnstart(ri.Onstart, app)
+					status := ri.ActualStatus
+					if ri.CurState == "stopped" || ri.CurState == "exited" {
+						status = ri.CurState
+					}
+					if ri.StatusMsg != "" {
+						status = fmt.Sprintf("%s (%s)", status, ri.StatusMsg)
+					}
 					inst := &entity.Instance{
 						VastaiID:   vastID,
 						ModelName:  modelName,
-						Status:     entity.InstanceStatus(ri.ActualStatus),
+						Status:     entity.InstanceStatus(status),
 						SSHHost:    ri.SSHHost,
 						SSHPort:    ri.GetSSHPort(),
 						HourlyRate: ri.DPHTotal,
@@ -86,8 +101,8 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tMODEL\tHEALTH\tTUNNEL URL")
-			fmt.Fprintln(w, "--\t-------\t------\t-----\t------\t----------")
+			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tMODEL\tVOLUME\tHEALTH\tTUNNEL URL")
+			fmt.Fprintln(w, "--\t-------\t------\t-----\t------\t------\t----------")
 
 			for _, inst := range localInstances {
 				tunnelURL := "-"
@@ -105,8 +120,14 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 					}
 				}
 
-				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\n",
-					inst.ID, inst.VastaiID, inst.Status, inst.ModelName, health, tunnelURL)
+				// Extract volume from remote instance's extra_env (e.g. ["-v V.123:/path", "1"])
+				volName := "-"
+				if ri, ok := remoteMap[inst.VastaiID]; ok {
+					volName = extractVolumeName(ri)
+				}
+
+				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\t%s\n",
+					inst.ID, inst.VastaiID, inst.Status, inst.ModelName, volName, health, tunnelURL)
 			}
 			return w.Flush()
 		},
@@ -124,6 +145,20 @@ func checkHealth(localPort int) string {
 		return "healthy"
 	}
 	return fmt.Sprintf("unhealthy (%d)", resp.StatusCode)
+}
+
+func extractVolumeName(ri vastai.InstanceInfo) string {
+	for _, env := range ri.ExtraEnv {
+		if len(env) > 0 && strings.HasPrefix(env[0], "-v ") {
+			// "-v V.123456:/mount/path" → "V.123456"
+			vol := strings.TrimPrefix(env[0], "-v ")
+			if idx := strings.Index(vol, ":"); idx > 0 {
+				return vol[:idx]
+			}
+			return vol
+		}
+	}
+	return "-"
 }
 
 func detectModelFromOnstart(onstart string, app *application.App) string {

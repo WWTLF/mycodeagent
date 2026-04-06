@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/domain/entity"
@@ -13,7 +14,7 @@ import (
 type VastaiProvider interface {
 	SearchOffers(minGPURAM int, numGPUs int) ([]OfferResult, error)
 	CreateInstance(offerID int, image string, envVars map[string]string, onstart string, volumeID int, mountPath string) (instanceID int, err error)
-	WaitForInstance(ctx context.Context, instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error)
+	WaitForInstance(ctx context.Context, instanceID int, volumeID int) (sshHost string, sshPort int, hourlyRate float64, err error)
 	StopInstance(instanceID int) error
 	DestroyInstance(instanceID int) error
 	SearchVolumeOffers(sizeGB int) ([]VolumeOfferResult, error)
@@ -34,6 +35,20 @@ type VolumeResult struct {
 	VolumeName string
 	SizeGB     int
 	MachineID  int
+}
+
+// EngineProvider abstracts engine-specific deployment details (vLLM, LM Studio, etc.)
+type EngineProvider interface {
+	// DockerImage returns the Docker image to use on vast.ai
+	DockerImage() string
+	// BuildOnstart returns the onstart shell script for the instance
+	BuildOnstart(model *entity.Model, hfToken string) string
+	// BuildRawCommand returns a human-readable command for --create-instance-only output
+	BuildRawCommand(model *entity.Model) string
+	// VolumeMountPath returns where to mount the persistent volume
+	VolumeMountPath() string
+	// RestartCommands returns the kill and start commands for restarting the server
+	RestartCommands(model *entity.Model) (killCmd string, startCmd string)
 }
 
 // SSHTunnelProvider abstracts SSH tunnel operations for the domain layer.
@@ -62,6 +77,7 @@ type DeployService struct {
 	volumes   repository.VolumeRepository
 	vastai    VastaiProvider
 	ssh       SSHTunnelProvider
+	engines   map[entity.ModelEngine]EngineProvider
 	basePort  int
 	hfToken   string
 }
@@ -72,6 +88,7 @@ func NewDeployService(
 	volumes repository.VolumeRepository,
 	vastai VastaiProvider,
 	ssh SSHTunnelProvider,
+	engines map[entity.ModelEngine]EngineProvider,
 	basePort int,
 	hfToken string,
 ) *DeployService {
@@ -81,9 +98,19 @@ func NewDeployService(
 		volumes:   volumes,
 		vastai:    vastai,
 		ssh:       ssh,
+		engines:   engines,
 		basePort:  basePort,
 		hfToken:   hfToken,
 	}
+}
+
+// engineFor returns the EngineProvider for the given model, defaulting to vLLM.
+func (s *DeployService) engineFor(model *entity.Model) EngineProvider {
+	eng := model.Engine
+	if eng == "" {
+		eng = entity.EngineVLLM
+	}
+	return s.engines[eng]
 }
 
 // Deploy executes the full init flow: find offer → create instance → SSH → vLLM → tunnel.
@@ -120,8 +147,9 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 	offer := offers[0] // cheapest (already sorted)
 	fmt.Printf("Selected: %s (%.0fGB) at $%.3f/hr\n", offer.GPUName, offer.GPUMemory, offer.DPHTotal)
 
-	// 2. Build vLLM startup command
-	vllmCmd := s.buildVLLMCommand(model)
+	// 2. Build startup command via engine provider
+	engine := s.engineFor(model)
+	onstart := engine.BuildOnstart(model, s.hfToken)
 
 	envVars := map[string]string{}
 	if s.hfToken != "" {
@@ -129,16 +157,19 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
 	}
 
-	// 3. Check for volume to attach
+	// 3. Ensure volume exists
 	var volumeID int
 	var mountPath string
 	if !noVolume {
-		volumeID, mountPath = s.ensureVolume(offer)
+		volumeID, mountPath, err = s.ensureVolume(offer, engine.VolumeMountPath())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 4. Create instance
 	fmt.Println("Creating instance...")
-	instanceID, err := s.vastai.CreateInstance(offer.ID, "vllm/vllm-openai:latest", envVars, vllmCmd, volumeID, mountPath)
+	instanceID, err := s.vastai.CreateInstance(offer.ID, engine.DockerImage(), envVars, onstart, volumeID, mountPath)
 	if err != nil {
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
@@ -146,7 +177,7 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 
 	// 5. Wait for instance to be running
 	fmt.Println("Waiting for instance to start...")
-	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
+	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID, volumeID)
 	if err != nil {
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
@@ -180,6 +211,7 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 		SSHPort:    sshPort,
 		TunnelPID:  tunnelPID,
 		HourlyRate: hourlyRate,
+		VolumeID:   int64(volumeID),
 	}
 	if err := s.instances.Save(inst); err != nil {
 		return nil, fmt.Errorf("save instance: %w", err)
@@ -206,8 +238,8 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 }
 
 type CreateOnlyResult struct {
-	Instance   *entity.Instance
-	VLLMCommand string
+	Instance     *entity.Instance
+	ServeCommand string
 }
 
 // DeployCreateOnly creates the instance and waits for it to be running, but does not
@@ -241,8 +273,9 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 	offer := offers[0]
 	fmt.Printf("Selected: %s (%.0fGB) at $%.3f/hr\n", offer.GPUName, offer.GPUMemory, offer.DPHTotal)
 
-	// 2. Build vLLM startup command
-	vllmCmd := s.buildVLLMCommand(model)
+	// 2. Build startup command via engine provider
+	engine := s.engineFor(model)
+	onstart := engine.BuildOnstart(model, s.hfToken)
 
 	envVars := map[string]string{}
 	if s.hfToken != "" {
@@ -250,24 +283,27 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
 	}
 
-	// 3. Check for volume to attach
+	// 3. Ensure volume exists
 	var volumeID int
 	var mountPath string
 	if !noVolume {
-		volumeID, mountPath = s.ensureVolume(offer)
+		volumeID, mountPath, err = s.ensureVolume(offer, engine.VolumeMountPath())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 4. Create instance
 	fmt.Println("Creating instance...")
-	instanceID, err := s.vastai.CreateInstance(offer.ID, "vllm/vllm-openai:latest", envVars, vllmCmd, volumeID, mountPath)
+	instanceID, err := s.vastai.CreateInstance(offer.ID, engine.DockerImage(), envVars, onstart, volumeID, mountPath)
 	if err != nil {
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
 	fmt.Printf("Instance created: %d\n", instanceID)
 
-	// 4. Wait for instance to be running
+	// 5. Wait for instance to be running
 	fmt.Println("Waiting for instance to start...")
-	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
+	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID, volumeID)
 	if err != nil {
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
@@ -280,18 +316,13 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 		SSHHost:    sshHost,
 		SSHPort:    sshPort,
 		HourlyRate: hourlyRate,
+		VolumeID:   int64(volumeID),
 	}
 	if err := s.instances.Save(inst); err != nil {
 		return nil, fmt.Errorf("save instance: %w", err)
 	}
 
-	// Build the raw vLLM command (without the onstart wrapper)
-	rawCmd := fmt.Sprintf("vllm serve '%s' --host 0.0.0.0 --port 8000", model.HFRepo)
-	for _, arg := range model.VLLMArgs {
-		rawCmd += " " + arg
-	}
-
-	return &CreateOnlyResult{Instance: inst, VLLMCommand: rawCmd}, nil
+	return &CreateOnlyResult{Instance: inst, ServeCommand: engine.BuildRawCommand(model)}, nil
 }
 
 // Stop stops a single instance by local DB ID.
@@ -312,7 +343,7 @@ func (s *DeployService) Stop(id int64) error {
 	return s.instances.Update(inst)
 }
 
-// Destroy destroys a single instance permanently.
+// Destroy destroys a single instance and its volumes permanently.
 func (s *DeployService) Destroy(id int64) error {
 	inst, err := s.instances.FindByID(id)
 	if err != nil {
@@ -325,100 +356,110 @@ func (s *DeployService) Destroy(id int64) error {
 		return fmt.Errorf("destroy vast.ai instance: %w", err)
 	}
 
+	// Delete the associated volume
+	if inst.VolumeID > 0 {
+		vols, _ := s.volumes.FindAll()
+		for _, vol := range vols {
+			if vol.VastaiID == inst.VolumeID {
+				fmt.Printf("Deleting volume %d (%s)...\n", vol.ID, vol.VolumeName)
+				if err := s.vastai.DeleteVolume(int(vol.VastaiID)); err != nil {
+					fmt.Printf("Warning: could not delete volume from vast.ai: %v\n", err)
+				}
+				s.volumes.Delete(vol.ID)
+				break
+			}
+		}
+	}
+
 	return s.instances.Delete(inst.ID)
 }
 
-// RestartVLLM kills the running vLLM process and restarts it using /tmp/start_vllm.sh.
-func (s *DeployService) RestartVLLM(id int64) error {
+// Restart regenerates the startup script, kills the running server, and restarts it.
+func (s *DeployService) Restart(id int64) error {
 	inst, err := s.instances.FindByID(id)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Restarting vLLM on instance %d (%s)...\n", inst.ID, inst.ModelName)
-
-	killCmd := "pkill -f 'vllm serve' 2>/dev/null; sleep 2; pkill -9 -f 'vllm serve' 2>/dev/null; sleep 1"
-	fmt.Println("Killing vLLM...")
-	s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, killCmd)
-
-	startCmd := "nohup bash /tmp/start_vllm.sh 2>&1 | tee /tmp/vllm.log &"
-	fmt.Println("Starting vLLM...")
-	_, err = s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, startCmd)
+	model, err := s.models.FindByName(inst.ModelName)
 	if err != nil {
-		return fmt.Errorf("start vLLM: %w", err)
+		return fmt.Errorf("model lookup: %w", err)
 	}
 
-	fmt.Println("vLLM restart initiated. Use 'mycodeagent log -f' to monitor.")
+	engine := s.engineFor(model)
+
+	// Regenerate the startup script on the instance so fixes are picked up
+	fmt.Println("Updating startup script...")
+	onstart := engine.BuildOnstart(model, s.hfToken)
+	// BuildOnstart returns: echo '...' > /tmp/script.sh && chmod +x ... && bash ...
+	// Strip the final "&& bash ..." to only write the file without executing
+	if idx := strings.LastIndex(onstart, " && bash "); idx > 0 {
+		writeOnly := onstart[:idx]
+		s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, writeOnly)
+	}
+
+	killCmd, startCmd := engine.RestartCommands(model)
+
+	fmt.Printf("Restarting model server on instance %d (%s)...\n", inst.ID, inst.ModelName)
+
+	fmt.Println("Stopping server...")
+	s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, killCmd)
+
+	fmt.Println("Starting server...")
+	_, err = s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, startCmd)
+	if err != nil {
+		return fmt.Errorf("start server: %w", err)
+	}
+
+	fmt.Println("Restart initiated. Use 'mycodeagent log -f' to monitor.")
 	return nil
 }
 
 const defaultVolumeSizeGB = 50
 
-// ensureVolume returns the volume ID and mount path for the given offer's machine.
-// If no volume exists on that machine, it creates one using the offer's avail_vol_ask_id.
-func (s *DeployService) ensureVolume(offer OfferResult) (int, string) {
-	// Check if we already have a volume on this machine
+// ensureVolume returns an existing or newly created volume for the offer's machine.
+func (s *DeployService) ensureVolume(offer OfferResult, mountPath string) (int, string, error) {
+	// Reuse existing volume on this machine (trust local DB — API doesn't show unattached volumes)
 	vols, _ := s.volumes.FindAll()
 	for _, vol := range vols {
 		if vol.MachineID == offer.MachineID {
-			fmt.Printf("Attaching volume %d (%s) at %s\n", vol.ID, vol.VolumeName, vol.MountPath)
-			return int(vol.VastaiID), vol.MountPath
+			fmt.Printf("Using existing volume %s on machine %d\n", vol.VolumeName, vol.MachineID)
+			return int(vol.VastaiID), vol.MountPath, nil
 		}
 	}
 
-	// No volume on this machine — create one
+	// Create new volume
 	if offer.AvailVolAskID == nil {
-		fmt.Println("Warning: machine has no volume offer, proceeding without volume")
-		return 0, ""
+		return 0, "", fmt.Errorf("machine %d has no volume offer", offer.MachineID)
 	}
 
 	fmt.Printf("Creating volume (%d GB) on machine %d...\n", defaultVolumeSizeGB, offer.MachineID)
 	result, err := s.vastai.RentVolume(*offer.AvailVolAskID, defaultVolumeSizeGB)
 	if err != nil {
-		fmt.Printf("Warning: could not create volume: %v, proceeding without volume\n", err)
-		return 0, ""
+		return 0, "", fmt.Errorf("create volume: %w", err)
 	}
-	fmt.Printf("Volume created: %s\n", result.VolumeName)
 
-	// Look up the actual volume ID from the API
-	remoteVols, err := s.vastai.ListVolumes()
-	if err != nil {
-		fmt.Printf("Warning: could not list volumes: %v, proceeding without volume\n", err)
-		return 0, ""
-	}
+	// Parse volume ID from name (e.g. "V.34258398" → 34258398)
 	var vastaiID int
-	for _, rv := range remoteVols {
-		if rv.VolumeName == result.VolumeName {
-			vastaiID = rv.ID
-			break
-		}
+	if strings.HasPrefix(result.VolumeName, "V.") {
+		fmt.Sscanf(result.VolumeName[2:], "%d", &vastaiID)
 	}
 	if vastaiID == 0 {
-		fmt.Println("Warning: volume created but not found in API listing, proceeding without volume")
-		return 0, ""
+		return 0, "", fmt.Errorf("could not parse volume ID from %s", result.VolumeName)
 	}
 
 	vol := &entity.Volume{
 		VastaiID:   int64(vastaiID),
 		VolumeName: result.VolumeName,
 		SizeGB:     defaultVolumeSizeGB,
-		MountPath:  defaultMountPath,
+		MountPath:  mountPath,
 		MachineID:  offer.MachineID,
 	}
 	if err := s.volumes.Save(vol); err != nil {
-		fmt.Printf("Warning: could not save volume locally: %v\n", err)
+		return 0, "", fmt.Errorf("save volume: %w", err)
 	}
 
-	fmt.Printf("Attaching volume %d (%s) at %s\n", vol.ID, vol.VolumeName, vol.MountPath)
-	return vastaiID, defaultMountPath
+	fmt.Printf("Volume %s created on machine %d\n", result.VolumeName, offer.MachineID)
+	return vastaiID, mountPath, nil
 }
 
-func (s *DeployService) buildVLLMCommand(model *entity.Model) string {
-	vllmCmd := fmt.Sprintf("vllm serve '%s' --host 0.0.0.0 --port 8000", model.HFRepo)
-	for _, arg := range model.VLLMArgs {
-		vllmCmd += " " + arg
-	}
-	// Write as a script to avoid shell line-splitting issues in vast.ai onstart
-	script := fmt.Sprintf("echo '%s' > /tmp/start_vllm.sh && chmod +x /tmp/start_vllm.sh && bash /tmp/start_vllm.sh 2>&1 | tee /tmp/vllm.log", vllmCmd)
-	return script
-}

@@ -6,8 +6,10 @@ import (
 
 	"github.com/WWTLF/mycodeagent/cmd/mycodeagent/commands"
 	"github.com/WWTLF/mycodeagent/internal/application"
+	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/WWTLF/mycodeagent/internal/domain/service"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/config"
+	"github.com/WWTLF/mycodeagent/internal/infrastructure/engine"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/persistence"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/ssh"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/vastai"
@@ -42,9 +44,14 @@ func main() {
 	sshAdapter := ssh.NewAdapter()
 	vastaiClient := vastai.NewClient(cfg.VastaiAPIKey)
 
+	engines := map[entity.ModelEngine]service.EngineProvider{
+		entity.EngineVLLM:     engine.NewVLLMEngine(),
+		entity.EngineLMStudio: engine.NewLMStudioEngine(),
+	}
+
 	deploySvc := service.NewDeployService(
 		modelRepo, instanceRepo, volumeRepo,
-		vastaiAdapter, sshAdapter,
+		vastaiAdapter, sshAdapter, engines,
 		cfg.BasePort, cfg.HFToken,
 	)
 

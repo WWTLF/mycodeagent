@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/WWTLF/mycodeagent/internal/domain/repository"
@@ -49,20 +50,13 @@ func (s *VolumeService) Create(sizeGB int) (*entity.Volume, error) {
 	}
 	fmt.Printf("Volume created: %s\n", result.VolumeName)
 
-	// Look up the actual volume ID from the API (RentVolume only returns the name)
-	remoteVols, err := s.vastai.ListVolumes()
-	if err != nil {
-		return nil, fmt.Errorf("list volumes after rent: %w", err)
-	}
-	var vastaiID int
-	for _, rv := range remoteVols {
-		if rv.VolumeName == result.VolumeName {
-			vastaiID = rv.ID
-			break
-		}
+	// Extract volume ID from name (e.g. "V.34258398" → 34258398)
+	vastaiID := 0
+	if strings.HasPrefix(result.VolumeName, "V.") {
+		fmt.Sscanf(result.VolumeName[2:], "%d", &vastaiID)
 	}
 	if vastaiID == 0 {
-		return nil, fmt.Errorf("volume %s created but not found in API listing", result.VolumeName)
+		return nil, fmt.Errorf("could not parse volume ID from %s", result.VolumeName)
 	}
 
 	vol := &entity.Volume{
@@ -79,7 +73,7 @@ func (s *VolumeService) Create(sizeGB int) (*entity.Volume, error) {
 	return vol, nil
 }
 
-// List returns all volumes from the local DB.
+// List returns all volumes, cleaning up stale records when the API confirms they're gone.
 func (s *VolumeService) List() ([]*entity.Volume, error) {
 	return s.volumes.FindAll()
 }

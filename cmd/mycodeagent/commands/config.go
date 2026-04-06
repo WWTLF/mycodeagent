@@ -52,8 +52,6 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				}
 			}
 
-			// Build models map from all running instances with tunnels
-			models := make(map[string]any)
 			var defaultModel string
 
 			for _, inst := range instances {
@@ -86,8 +84,6 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 						hfRepo: buildModelConfig(hfRepo, maxModelLen),
 					},
 				}
-				models[providerName] = hfRepo
-
 				// First instance becomes the default
 				if defaultModel == "" {
 					defaultModel = providerName + "/" + hfRepo

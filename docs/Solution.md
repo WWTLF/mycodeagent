@@ -119,10 +119,11 @@ graph LR
 
 | Model | Alias | GPUs | Timeout |
 |---|---|---|---|
-| `qwen3-32b-awq` | coder | 1x GPU | 10 min |
+| `qwen3-5-35b-a3b-awq` | coder | 2x GPU (24 GB) | 20 min |
 | `qwen3-vl-32b-instruct-awq` | coder_vl | 2x GPU | 15 min |
 | `qwen25-32b-instruct-awq` | writer | 2x GPU | 15 min |
 | `dolphin-glm-24b` | rude | 2x GPU | 15 min |
+| `qwen25-coder-32b-gguf` | coder-2 | 1x GPU (24 GB) | 15 min |
 
 Bigger models (multi-GPU, larger downloads) get longer timeouts. If `StartupTimeout` is unset, the default is **10 minutes**.
 

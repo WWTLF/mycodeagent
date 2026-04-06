@@ -41,24 +41,41 @@ type Offer struct {
 	MachineID      int     `json:"machine_id"`
 	AvailVolAskID  *int    `json:"avail_vol_ask_id"`
 	AvailVolSize   float64 `json:"avail_vol_size"`
+	Verification   string  `json:"verification"`
 }
 
 type InstanceInfo struct {
-	ID           int     `json:"id"`
-	ActualStatus string  `json:"actual_status"`
-	PublicIPAddr string  `json:"public_ipaddr"`
-	SSHHost      string  `json:"ssh_host"`
-	SSHPort      int     `json:"ssh_port"`
-	DPHTotal     float64 `json:"dph_total"`
-	Label        string  `json:"label"`
-	ImageUUID    string  `json:"image_uuid"`
-	Onstart      string  `json:"onstart"`
+	ID             int     `json:"id"`
+	ActualStatus   string  `json:"actual_status"`
+	CurState       string  `json:"cur_state"`
+	IntendedStatus string  `json:"intended_status"`
+	StatusMsg      string  `json:"status_msg"`
+	PublicIPAddr   string  `json:"public_ipaddr"`
+	SSHHost        string  `json:"ssh_host"`
+	SSHPort        int     `json:"ssh_port"`
+	DPHTotal       float64 `json:"dph_total"`
+	Verification   string  `json:"verification"`
+	MachineID      int     `json:"machine_id"`
+	Label          string  `json:"label"`
+	ImageUUID      string  `json:"image_uuid"`
+	Onstart        string      `json:"onstart"`
+	ExtraEnv       [][]string  `json:"extra_env"`
 	// Ports is a nested map: {"22/tcp": [{"HostPort": "12345"}]}
 	Ports map[string][]PortMapping `json:"ports"`
 }
 
 type PortMapping struct {
 	HostPort string `json:"HostPort"`
+}
+
+func (i *InstanceInfo) HasVolume(volumeID int) bool {
+	needle := fmt.Sprintf("V.%d:", volumeID)
+	for _, env := range i.ExtraEnv {
+		if len(env) > 0 && strings.Contains(env[0], needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (i *InstanceInfo) GetSSHPort() int {
