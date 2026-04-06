@@ -110,6 +110,13 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 			}
 			cfg["lsp"] = lsp
 
+			// Set mode temperatures (Qwen3 thinking requires 0.6, greedy decoding breaks thinking)
+			cfg["mode"] = map[string]any{
+				"build":   map[string]any{"temperature": 0.6},
+				"plan":    map[string]any{"temperature": 0.6},
+				"analyze": map[string]any{"temperature": 0.6},
+			}
+
 			out, err := json.MarshalIndent(cfg, "", "  ")
 			if err != nil {
 				return fmt.Errorf("marshal config: %w", err)
