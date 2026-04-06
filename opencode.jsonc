@@ -1,21 +1,28 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "mycodeagent-6/Qwen/Qwen3-32B-AWQ",
+  "mode": {
+    "analyze": {
+      "temperature": 0.6
+    },
+    "build": {
+      "temperature": 0.6
+    },
+    "plan": {
+      "temperature": 0.6
+    }
+  },
+  "model": "mycodeagent-50/bartowski/Qwen2.5-Coder-32B-Instruct-GGUF",
   "provider": {
-    "mycodeagent-6": {
+    "mycodeagent-50": {
       "models": {
-        "Qwen/Qwen3-32B-AWQ": {
-          "limit": {
-            "context": 32768,
-            "output": 8192
-          },
-          "name": "Qwen/Qwen3-32B-AWQ"
+        "bartowski/Qwen2.5-Coder-32B-Instruct-GGUF": {
+          "name": "bartowski/Qwen2.5-Coder-32B-Instruct-GGUF"
         }
       },
-      "name": "mycodeagent qwen3-32b-awq",
+      "name": "mycodeagent qwen25-coder-32b-gguf",
       "npm": "@ai-sdk/openai-compatible",
       "options": {
-        "baseURL": "http://localhost:8001/v1"
+        "baseURL": "http://localhost:8000/v1"
       }
     }
   }

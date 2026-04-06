@@ -49,7 +49,7 @@ func (r *SQLiteInstanceRepository) FindAll() ([]*entity.Instance, error) {
 }
 
 func (r *SQLiteInstanceRepository) FindRunning() ([]*entity.Instance, error) {
-	return r.scanMany("SELECT * FROM instances WHERE status IN ('starting', 'running') ORDER BY created_at DESC")
+	return r.scanMany("SELECT * FROM instances WHERE status LIKE 'starting%' OR status LIKE 'running%' ORDER BY created_at DESC")
 }
 
 func (r *SQLiteInstanceRepository) Update(inst *entity.Instance) error {

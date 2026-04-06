@@ -95,17 +95,6 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 			cfg["provider"] = providers
 			cfg["model"] = defaultModel
 
-			// Add Go LSP (gopls)
-			lsp, _ := cfg["lsp"].(map[string]any)
-			if lsp == nil {
-				lsp = make(map[string]any)
-			}
-			lsp["golang"] = map[string]any{
-				"command": "gopls",
-				"args":    []string{"serve"},
-			}
-			cfg["lsp"] = lsp
-
 			// Set mode temperatures (Qwen3 thinking requires 0.6, greedy decoding breaks thinking)
 			cfg["mode"] = map[string]any{
 				"build":   map[string]any{"temperature": 0.6},

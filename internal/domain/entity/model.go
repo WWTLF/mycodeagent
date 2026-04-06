@@ -26,6 +26,7 @@ type Model struct {
 	NumGPUs        int           // number of GPUs needed (0 or 1 = single GPU)
 	StartupTimeout time.Duration // max time to wait for instance + vLLM to become healthy
 	Engine         ModelEngine   // "vllm" (default) or "lmstudio"
+	ContextLength  int           // max context length for serving (0 = engine default)
 	VLLMArgs       []string      // vLLM-specific serve arguments
 	GGUFFile       string        // LM Studio-specific: GGUF filename to download
 }
