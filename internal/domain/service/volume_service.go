@@ -75,7 +75,31 @@ func (s *VolumeService) Create(sizeGB int) (*entity.Volume, error) {
 
 // List returns all volumes, cleaning up stale records when the API confirms they're gone.
 func (s *VolumeService) List() ([]*entity.Volume, error) {
-	return s.volumes.FindAll()
+	localVols, err := s.volumes.FindAll()
+	if err != nil {
+		return nil, err
+	}
+
+	remoteVols, err := s.vastai.ListVolumes()
+	if err != nil {
+		return localVols, nil
+	}
+
+	remoteIDs := make(map[int]bool, len(remoteVols))
+	for _, rv := range remoteVols {
+		remoteIDs[rv.ID] = true
+	}
+
+	var result []*entity.Volume
+	for _, vol := range localVols {
+		if remoteIDs[int(vol.VastaiID)] {
+			result = append(result, vol)
+		} else {
+			fmt.Printf("Removing stale volume %d (%s) — no longer exists on vast.ai\n", vol.ID, vol.VolumeName)
+			s.volumes.Delete(vol.ID)
+		}
+	}
+	return result, nil
 }
 
 // Delete removes a volume from vast.ai and local DB.

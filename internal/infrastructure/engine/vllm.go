@@ -14,7 +14,7 @@ func NewVLLMEngine() *VLLMEngine {
 }
 
 func (e *VLLMEngine) DockerImage() string {
-	return "vllm/vllm-openai:latest"
+	return "vllm/vllm-openai:v0.19.0"
 }
 
 func (e *VLLMEngine) BuildOnstart(model *entity.Model, hfToken string) string {

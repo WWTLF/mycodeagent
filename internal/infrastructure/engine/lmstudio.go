@@ -18,30 +18,18 @@ func (e *LMStudioEngine) DockerImage() string {
 }
 
 func (e *LMStudioEngine) BuildOnstart(model *entity.Model, hfToken string) string {
-	modelDir := fmt.Sprintf("/root/.lmstudio/models/%s", model.HFRepo)
-
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\nset -e\n")
-	b.WriteString("apt-get update && apt-get install -y curl python3-pip\n")
-	b.WriteString("pip install huggingface-hub\n\n")
 
-	// Download GGUF model via Python API (huggingface-cli entry point removed in v1.9+)
-	b.WriteString(fmt.Sprintf("mkdir -p '%s'\n", modelDir))
-	if hfToken != "" {
-		fmt.Fprintf(&b, "python3 -c \"from huggingface_hub import hf_hub_download; hf_hub_download('%s', '%s', local_dir='%s', token='%s')\"\n\n",
-			model.HFRepo, model.GGUFFile, modelDir, hfToken)
-	} else {
-		fmt.Fprintf(&b, "python3 -c \"from huggingface_hub import hf_hub_download; hf_hub_download('%s', '%s', local_dir='%s')\"\n\n",
-			model.HFRepo, model.GGUFFile, modelDir)
-	}
-
-	// Install LM Studio CLI
+	// Install LM Studio CLI (llmster)
+	b.WriteString("apt-get update && apt-get install -y curl libatomic1\n")
 	b.WriteString("curl -fsSL https://lmstudio.ai/install.sh | bash\n")
 	b.WriteString("export PATH=\"$HOME/.lmstudio/bin:$PATH\"\n\n")
 
-	// Start daemon, load model, start server
+	// Start daemon, download model, load it, start server
 	b.WriteString("lms daemon up\n")
-	b.WriteString(fmt.Sprintf("lms load '%s/%s' --gpu max --yes\n", model.HFRepo, model.GGUFFile))
+	fmt.Fprintf(&b, "lms get 'https://huggingface.co/%s' --yes\n", model.HFRepo)
+	fmt.Fprintf(&b, "lms load '%s' --gpu max --yes\n", model.HFRepo)
 	b.WriteString("lms server start --port 8000\n")
 
 	script := b.String()
@@ -50,8 +38,8 @@ func (e *LMStudioEngine) BuildOnstart(model *entity.Model, hfToken string) strin
 }
 
 func (e *LMStudioEngine) BuildRawCommand(model *entity.Model) string {
-	return fmt.Sprintf("lms daemon up && lms load '%s/%s' --gpu max --yes && lms server start --port 8000",
-		model.HFRepo, model.GGUFFile)
+	return fmt.Sprintf("lms daemon up && lms get 'https://huggingface.co/%s' --yes && lms load '%s' --gpu max --yes && lms server start --port 8000",
+		model.HFRepo, model.HFRepo)
 }
 
 func (e *LMStudioEngine) VolumeMountPath() string {

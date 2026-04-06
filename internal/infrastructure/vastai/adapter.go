@@ -103,10 +103,10 @@ func (a *Adapter) WaitForInstance(ctx context.Context, instanceID int, volumeID 
 			}
 			volStatus := ""
 			if volumeID > 0 {
-				if inst.HasVolume(volumeID) {
-					volStatus = fmt.Sprintf(" | volume V.%d: attached", volumeID)
+				if a.volumeExists(volumeID) {
+					volStatus = fmt.Sprintf(" | volume V.%d: ok", volumeID)
 				} else {
-					volStatus = fmt.Sprintf(" | volume V.%d: MISSING", volumeID)
+					volStatus = fmt.Sprintf(" | volume V.%d: GONE", volumeID)
 				}
 			}
 			fmt.Printf("  [%d] Status: %s%s\n", i, status, volStatus)
@@ -118,6 +118,19 @@ func (a *Adapter) WaitForInstance(ctx context.Context, instanceID int, volumeID 
 		case <-ticker.C:
 		}
 	}
+}
+
+func (a *Adapter) volumeExists(volumeID int) bool {
+	vols, err := a.client.ListVolumes()
+	if err != nil {
+		return true // assume exists if API call fails
+	}
+	for _, v := range vols {
+		if v.ID == volumeID {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Adapter) StopInstance(instanceID int) error {
