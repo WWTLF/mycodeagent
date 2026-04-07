@@ -160,11 +160,14 @@ func (c *Client) VerifyAPIKey() error {
 func (c *Client) SearchOffers(minGPURAM int, numGPUs int) ([]Offer, error) {
 	// gpu_ram is in MB on vast.ai API; compute_cap >= 800 required for AWQ/GPTQ kernels.
 	// Use 90% threshold to catch GPUs that report slightly less (e.g. RTX 3090 reports ~23GB).
-	// cuda_vers >= 12.8 filters out hosts whose NVIDIA driver is older than what
-	// vllm/vllm-openai:v0.19.0 needs — those report CUDA error 804 "forward compatibility
-	// attempted on non supported HW" and never successfully initialize a worker.
-	// Vast.ai's own "CUDA Driver Incompatibility" docs recommend 12.6+; the autoresearch
-	// example uses 12.8 for similar heavy vLLM workloads. 12.4 wasn't strict enough.
+	// cuda_vers >= 12.8 filters by the CUDA *toolkit* installed on the host, but that's
+	// not enough — what actually matters for forward compatibility is the *driver* cap.
+	// cuda_max_good is the maximum CUDA runtime version the host driver can run; if the
+	// vllm-openai image's runtime CUDA exceeds this, workers crash at torch._C._cuda_init
+	// with "Error 804: forward compatibility was attempted on non supported HW" because
+	// consumer GPUs (RTX 30xx/40xx) don't implement CUDA forward compat — only datacenter
+	// cards do. Filtering on cuda_max_good >= 12.8 weeds out under-driver hosts before
+	// they ever boot a container. We keep cuda_vers as a belt-and-suspenders check.
 	// disk_space >= 60 ensures the host has at least 60 GB free for our 40 GB container
 	// rootfs request plus image layers + scratch (the vllm-openai image alone is ~15 GB).
 	// Without this, vast.ai can land us on a near-full host and container creation fails
@@ -176,7 +179,7 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int) ([]Offer, error) {
 	// verified==true filters out unverified hosts whose vast.ai worker is often broken
 	// (those emit `docker_build() error writing dockerfile` at container creation).
 	// reliability2 >= 0.95 further weeds out hosts with flaky recent uptime history.
-	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"cuda_vers\":{\"gte\":12.8},\"disk_space\":{\"gte\":60},\"verified\":{\"eq\":true},\"reliability2\":{\"gte\":0.95},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs)
+	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"cuda_vers\":{\"gte\":12.8},\"cuda_max_good\":{\"gte\":12.8},\"disk_space\":{\"gte\":60},\"verified\":{\"eq\":true},\"reliability2\":{\"gte\":0.95},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs)
 
 	var offers struct {
 		Offers []Offer `json:"offers"`

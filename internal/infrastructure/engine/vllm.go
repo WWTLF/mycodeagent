@@ -31,7 +31,20 @@ func (e *VLLMEngine) VolumeMountPath() string {
 }
 
 func (e *VLLMEngine) RestartCommands(model *entity.Model) (killCmd string, startCmd string) {
-	killCmd = "pkill -f 'vllm serve' 2>/dev/null; sleep 2; pkill -9 -f 'vllm serve' 2>/dev/null; sleep 1"
+	// vLLM v1 spawns subprocesses (EngineCore, Worker_TP*) whose argv does NOT contain
+	// "vllm serve", so a single pkill on that pattern leaves orphans holding GPU memory
+	// and the next start fails with CUDA OOM. Catch the subprocess patterns too, then
+	// SIGKILL anything still alive.
+	killCmd = strings.Join([]string{
+		"pkill -f 'vllm serve' 2>/dev/null",
+		"pkill -f 'multiproc_executor' 2>/dev/null",
+		"pkill -f 'EngineCore' 2>/dev/null",
+		"pkill -f 'vllm.v1' 2>/dev/null",
+		"sleep 2",
+		"pkill -9 -f 'vllm' 2>/dev/null",
+		"pkill -9 -f 'multiproc_executor' 2>/dev/null",
+		"sleep 1",
+	}, "; ")
 	startCmd = "nohup bash /tmp/start_vllm.sh 2>&1 | tee /tmp/vllm.log &"
 	return
 }

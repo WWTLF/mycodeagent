@@ -48,6 +48,8 @@ func StartTunnel(localPort int, sshHost string, sshPort int) (*Tunnel, error) {
 	cmd := exec.Command("ssh", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	fmt.Printf("[ssh] %s\n", cmd.String())
+
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start ssh tunnel: %w", err)
 	}
@@ -122,6 +124,7 @@ func RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, erro
 		fmt.Sprintf("root@%s", sshHost),
 		command,
 	)
+	fmt.Printf("[ssh] %s\n", cmd.String())
 	return cmd.CombinedOutput()
 }
 

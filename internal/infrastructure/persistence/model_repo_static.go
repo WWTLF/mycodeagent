@@ -10,9 +10,9 @@ import (
 
 var defaultModels = []*entity.Model{
 	{
-		Name:             "qwen3-5-35b-a3b-gptq",
+		Name:             "qwen3-32b-awq",
 		Alias:            "coder",
-		HFRepo:           "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4",
+		HFRepo:           "Qwen/Qwen3-32B-AWQ",
 		Category:         entity.CategoryCoding,
 		VRAM:             24,
 		NumGPUs:          2,
@@ -20,12 +20,12 @@ var defaultModels = []*entity.Model{
 		ContextLength:    32768,
 		MaxContextLength: 131072,
 		VLLMArgs: []string{
-			"--quantization", "gptq_marlin",
+			"--quantization", "awq_marlin",
 			"--dtype", "half",
 			"--enable-auto-tool-choice",
 			"--tool-call-parser", "hermes",
 			"--reasoning-parser", "deepseek_r1",
-			"--gpu-memory-utilization", "0.95",
+			"--gpu-memory-utilization", "0.85",
 			"--trust-remote-code",
 			"--enable-prefix-caching",
 		},
@@ -63,19 +63,17 @@ var defaultModels = []*entity.Model{
 		},
 	},
 	{
-		Name:             "dolphin-glm-24b",
+		Name:             "dolphin-glm-24b-gguf",
 		Alias:            "rude",
-		HFRepo:           "DavidAU/Dolphin-Mistral-GLM-4.7-Flash-24B-Venice-Edition-Thinking-Uncensored",
+		HFRepo:           "mradermacher/Dolphin-Mistral-GLM-4.7-Flash-24B-Venice-Edition-Thinking-Uncensored-i1-GGUF",
 		Category:         entity.CategoryDolphin,
 		VRAM:             24,
 		NumGPUs:          2,
 		StartupTimeout:   15 * time.Minute,
-		ContextLength:    32768,
+		ContextLength:    65536,
 		MaxContextLength: 131072,
-		VLLMArgs: []string{
-			"--gpu-memory-utilization", "0.95",
-			"--trust-remote-code",
-		},
+		Engine:           entity.EngineLMStudio,
+		GGUFFile:         "Dolphin-Mistral-GLM-4.7-Flash-24B-Venice-Edition-Thinking-Uncensored.i1-Q4_K_M.gguf",
 	},
 	{
 		Name:             "qwen3-5-35b-a3b-gguf",
