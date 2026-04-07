@@ -17,7 +17,8 @@ func (e *LMStudioEngine) DockerImage() string {
 	return "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 }
 
-func (e *LMStudioEngine) BuildOnstart(model *entity.Model, hfToken string) string {
+func (e *LMStudioEngine) BuildOnstart(model *entity.Model, numGPUs, contextLength int, hfToken string) string {
+	_ = numGPUs // lms load --gpu max already uses every visible CUDA device
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\nset -e\n")
 
@@ -26,7 +27,9 @@ func (e *LMStudioEngine) BuildOnstart(model *entity.Model, hfToken string) strin
 	b.WriteString("curl -fsSL https://lmstudio.ai/install.sh | bash\n")
 	b.WriteString("export PATH=\"$HOME/.lmstudio/bin:$PATH\"\n\n")
 
-	// Start daemon, download model with specific quant, load it, start server
+	// Bootstrap is required on a fresh install before the daemon will come up
+	// in headless containers; without it `lms daemon up` times out.
+	b.WriteString("lms bootstrap\n")
 	b.WriteString("lms daemon up\n")
 	quant := extractQuant(model.GGUFFile)
 	if quant != "" {
@@ -34,9 +37,15 @@ func (e *LMStudioEngine) BuildOnstart(model *entity.Model, hfToken string) strin
 	} else {
 		fmt.Fprintf(&b, "lms get 'https://huggingface.co/%s' --yes\n", model.HFRepo)
 	}
-	// lms stores models with lowercase short names; load the first available LLM
-	if model.ContextLength > 0 {
-		fmt.Fprintf(&b, "lms load --gpu max --context-length %d --yes\n", model.ContextLength)
+	// lms stores models with lowercase short names; load the first available LLM.
+	// contextLength is the runtime value computed by DeployService (scaled for the offer);
+	// fall back to the model's baseline if the caller didn't pass one.
+	ctx := contextLength
+	if ctx <= 0 {
+		ctx = model.ContextLength
+	}
+	if ctx > 0 {
+		fmt.Fprintf(&b, "lms load --gpu max --context-length %d --yes\n", ctx)
 	} else {
 		b.WriteString("lms load --gpu max --yes\n")
 	}
@@ -56,13 +65,15 @@ func extractQuant(ggufFile string) string {
 	return ""
 }
 
-func (e *LMStudioEngine) BuildRawCommand(model *entity.Model) string {
+func (e *LMStudioEngine) BuildRawCommand(model *entity.Model, numGPUs, contextLength int) string {
+	_ = numGPUs
+	_ = contextLength
 	quant := extractQuant(model.GGUFFile)
 	if quant != "" {
-		return fmt.Sprintf("lms daemon up && lms get 'https://huggingface.co/%s@%s' --yes && lms load --gpu max --yes && lms server start --port 8000",
+		return fmt.Sprintf("lms bootstrap && lms daemon up && lms get 'https://huggingface.co/%s@%s' --yes && lms load --gpu max --yes && lms server start --port 8000",
 			model.HFRepo, quant)
 	}
-	return fmt.Sprintf("lms daemon up && lms get 'https://huggingface.co/%s' --yes && lms load --gpu max --yes && lms server start --port 8000",
+	return fmt.Sprintf("lms bootstrap && lms daemon up && lms get 'https://huggingface.co/%s' --yes && lms load --gpu max --yes && lms server start --port 8000",
 		model.HFRepo)
 }
 

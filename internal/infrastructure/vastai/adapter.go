@@ -30,12 +30,15 @@ func (a *Adapter) SearchOffers(minGPURAM int, numGPUs int) ([]service.OfferResul
 	}
 	var results []service.OfferResult
 	for _, o := range offers {
-		if o.Verification == "deverified" {
+		// Skip anything that isn't explicitly verified. Unverified hosts often fail
+		// at container creation with `docker_build() error writing dockerfile`.
+		if o.Verification != "verified" {
 			continue
 		}
 		results = append(results, service.OfferResult{
 			ID:            o.ID,
 			GPUName:       o.GPUName,
+			NumGPUs:       o.NumGPUs,
 			GPUMemory:     o.GPUMemory,
 			DPHTotal:      o.DPHTotal,
 			MachineID:     o.MachineID,
@@ -72,7 +75,7 @@ func (a *Adapter) WaitForInstance(ctx context.Context, instanceID int, volumeID 
 			_ = a.client.DestroyInstance(instanceID)
 			return "", 0, 0, fmt.Errorf("instance %d was deverified and has been destroyed", instanceID)
 		}
-		// Check volume still exists via API
+		// Check volume still exists via API.
 		if err == nil && volumeID > 0 {
 			if !a.volumeExists(volumeID) {
 				fmt.Printf("  [%d] Volume V.%d no longer exists — destroying instance %d\n", i, volumeID, instanceID)
@@ -169,6 +172,42 @@ func (a *Adapter) RentVolume(offerID int, sizeGB int) (*service.VolumeResult, er
 	return &service.VolumeResult{
 		VolumeName: resp.VolumeName,
 	}, nil
+}
+
+// WaitForVolumeReady polls vast.ai until the given volume's status leaves "initialized".
+// Vast.ai's CreateInstance rejects volumes still in that state with a misleading
+// "Volume X does not exist" 404, so callers must wait before passing the volume_id on.
+func (a *Adapter) WaitForVolumeReady(ctx context.Context, volumeID int) error {
+	const pollInterval = 5 * time.Second
+	for i := 1; ; i++ {
+		vols, err := a.client.ListVolumes()
+		switch {
+		case err != nil:
+			fmt.Printf("  [%d] Volume V.%d: ListVolumes error: %v — retrying\n", i, volumeID, err)
+		default:
+			found := false
+			for _, v := range vols {
+				if v.ID != volumeID {
+					continue
+				}
+				found = true
+				if v.Status != "initialized" {
+					fmt.Printf("  [%d] Volume V.%d is ready (status=%s)\n", i, volumeID, v.Status)
+					return nil
+				}
+				fmt.Printf("  [%d] Volume V.%d status=initialized, waiting...\n", i, volumeID)
+				break
+			}
+			if !found {
+				fmt.Printf("  [%d] Volume V.%d not yet visible in ListVolumes (%d volumes returned)\n", i, volumeID, len(vols))
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("volume V.%d did not become ready: %w", volumeID, ctx.Err())
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 func (a *Adapter) ListVolumes() ([]service.VolumeResult, error) {

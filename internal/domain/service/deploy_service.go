@@ -19,6 +19,7 @@ type VastaiProvider interface {
 	DestroyInstance(instanceID int) error
 	SearchVolumeOffers(sizeGB int) ([]VolumeOfferResult, error)
 	RentVolume(offerID int, sizeGB int) (*VolumeResult, error)
+	WaitForVolumeReady(ctx context.Context, volumeID int) error
 	ListVolumes() ([]VolumeResult, error)
 	DeleteVolume(volumeID int) error
 }
@@ -41,10 +42,12 @@ type VolumeResult struct {
 type EngineProvider interface {
 	// DockerImage returns the Docker image to use on vast.ai
 	DockerImage() string
-	// BuildOnstart returns the onstart shell script for the instance
-	BuildOnstart(model *entity.Model, hfToken string) string
-	// BuildRawCommand returns a human-readable command for --create-instance-only output
-	BuildRawCommand(model *entity.Model) string
+	// BuildOnstart returns the onstart shell script for the instance.
+	// numGPUs and contextLength come from the selected offer and the scaled context
+	// computed by DeployService — they override anything in the model definition.
+	BuildOnstart(model *entity.Model, numGPUs, contextLength int, hfToken string) string
+	// BuildRawCommand returns a human-readable command for --create-instance-only output.
+	BuildRawCommand(model *entity.Model, numGPUs, contextLength int) string
 	// VolumeMountPath returns where to mount the persistent volume
 	VolumeMountPath() string
 	// RestartCommands returns the kill and start commands for restarting the server
@@ -64,7 +67,8 @@ type SSHTunnelProvider interface {
 type OfferResult struct {
 	ID            int
 	GPUName       string
-	GPUMemory     float64
+	NumGPUs       int     // actual GPU count on this offer
+	GPUMemory     float64 // per-GPU VRAM in MB as reported by vast.ai
 	DPHTotal      float64
 	MachineID     int
 	AvailVolAskID *int    // volume offer on this machine (nil if none)
@@ -113,6 +117,37 @@ func (s *DeployService) engineFor(model *entity.Model) EngineProvider {
 	return s.engines[eng]
 }
 
+// scaledContextLength grows model.ContextLength linearly with per-GPU VRAM
+// headroom, capped at model.MaxContextLength. If MaxContextLength is unset or
+// the offer doesn't report more VRAM than baseline, the baseline is returned.
+// offerGPUMemoryMB is the per-GPU VRAM as reported by vast.ai (in MB).
+func scaledContextLength(model *entity.Model, offerGPUMemoryMB float64) int {
+	base := model.ContextLength
+	if base <= 0 {
+		return 0
+	}
+	maxCtx := model.MaxContextLength
+	if maxCtx <= base {
+		return base
+	}
+	if model.VRAM <= 0 || offerGPUMemoryMB <= 0 {
+		return base
+	}
+	requiredGB := float64(model.VRAM)
+	actualGB := offerGPUMemoryMB / 1024.0
+	if actualGB <= requiredGB {
+		return base
+	}
+	scaled := int(float64(base) * (actualGB / requiredGB))
+	if scaled > maxCtx {
+		scaled = maxCtx
+	}
+	if scaled < base {
+		scaled = base
+	}
+	return scaled
+}
+
 // Deploy executes the full init flow: find offer → create instance → SSH → vLLM → tunnel.
 // Unless noVolume is true, a volume is auto-created if none exists.
 func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instance, error) {
@@ -145,11 +180,17 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM", numGPUs, model.VRAM)
 	}
 	offer := offers[0] // cheapest (already sorted)
-	fmt.Printf("Selected: %s (%.0fGB) at $%.3f/hr\n", offer.GPUName, offer.GPUMemory, offer.DPHTotal)
+	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
 
-	// 2. Build startup command via engine provider
+	// 2. Build startup command via engine provider — pass the *actual* GPU count
+	// from the offer and a context length scaled to match the available VRAM.
 	engine := s.engineFor(model)
-	onstart := engine.BuildOnstart(model, s.hfToken)
+	contextLength := scaledContextLength(model, offer.GPUMemory)
+	if contextLength > 0 && contextLength != model.ContextLength {
+		fmt.Printf("Context length scaled: %d → %d (offer has %.0fGB per GPU vs baseline %dGB)\n",
+			model.ContextLength, contextLength, offer.GPUMemory/1024.0, model.VRAM)
+	}
+	onstart := engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
 
 	envVars := map[string]string{}
 	if s.hfToken != "" {
@@ -157,21 +198,10 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
 	}
 
-	// 3. Ensure volume exists
-	var volumeID int
-	var mountPath string
-	if !noVolume {
-		volumeID, mountPath, err = s.ensureVolume(offer, engine.VolumeMountPath())
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// 4. Create instance
-	fmt.Println("Creating instance...")
-	instanceID, err := s.vastai.CreateInstance(offer.ID, engine.DockerImage(), envVars, onstart, volumeID, mountPath)
+	// 3 + 4. Ensure volume + create instance (with stale-volume retry)
+	instanceID, volumeID, _, err := s.createInstanceWithVolumeRetry(ctx, offer, engine, envVars, onstart, noVolume)
 	if err != nil {
-		return nil, fmt.Errorf("create instance: %w", err)
+		return nil, err
 	}
 	fmt.Printf("Instance created: %d\n", instanceID)
 
@@ -212,6 +242,7 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 		TunnelPID:  tunnelPID,
 		HourlyRate: hourlyRate,
 		VolumeID:   int64(volumeID),
+		NumGPUs:    offer.NumGPUs,
 	}
 	if err := s.instances.Save(inst); err != nil {
 		return nil, fmt.Errorf("save instance: %w", err)
@@ -271,11 +302,12 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM", numGPUs, model.VRAM)
 	}
 	offer := offers[0]
-	fmt.Printf("Selected: %s (%.0fGB) at $%.3f/hr\n", offer.GPUName, offer.GPUMemory, offer.DPHTotal)
+	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
 
 	// 2. Build startup command via engine provider
 	engine := s.engineFor(model)
-	onstart := engine.BuildOnstart(model, s.hfToken)
+	contextLength := scaledContextLength(model, offer.GPUMemory)
+	onstart := engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
 
 	envVars := map[string]string{}
 	if s.hfToken != "" {
@@ -283,21 +315,10 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
 	}
 
-	// 3. Ensure volume exists
-	var volumeID int
-	var mountPath string
-	if !noVolume {
-		volumeID, mountPath, err = s.ensureVolume(offer, engine.VolumeMountPath())
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// 4. Create instance
-	fmt.Println("Creating instance...")
-	instanceID, err := s.vastai.CreateInstance(offer.ID, engine.DockerImage(), envVars, onstart, volumeID, mountPath)
+	// 3 + 4. Ensure volume + create instance (with stale-volume retry)
+	instanceID, volumeID, _, err := s.createInstanceWithVolumeRetry(ctx, offer, engine, envVars, onstart, noVolume)
 	if err != nil {
-		return nil, fmt.Errorf("create instance: %w", err)
+		return nil, err
 	}
 	fmt.Printf("Instance created: %d\n", instanceID)
 
@@ -317,12 +338,13 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 		SSHPort:    sshPort,
 		HourlyRate: hourlyRate,
 		VolumeID:   int64(volumeID),
+		NumGPUs:    offer.NumGPUs,
 	}
 	if err := s.instances.Save(inst); err != nil {
 		return nil, fmt.Errorf("save instance: %w", err)
 	}
 
-	return &CreateOnlyResult{Instance: inst, ServeCommand: engine.BuildRawCommand(model)}, nil
+	return &CreateOnlyResult{Instance: inst, ServeCommand: engine.BuildRawCommand(model, offer.NumGPUs, contextLength)}, nil
 }
 
 // Stop stops a single instance by local DB ID.
@@ -388,9 +410,16 @@ func (s *DeployService) Restart(id int64) error {
 
 	engine := s.engineFor(model)
 
-	// Regenerate the startup script on the instance so fixes are picked up
+	// Regenerate the startup script on the instance so fixes are picked up.
+	// Use the GPU count actually allocated at deploy time (persisted on the instance row),
+	// falling back to model.NumGPUs for legacy rows that predate the column.
+	// Restart happens after the offer is gone, so use the model's baseline context length.
+	numGPUs := inst.NumGPUs
+	if numGPUs <= 0 {
+		numGPUs = model.NumGPUs
+	}
 	fmt.Println("Updating startup script...")
-	onstart := engine.BuildOnstart(model, s.hfToken)
+	onstart := engine.BuildOnstart(model, numGPUs, model.ContextLength, s.hfToken)
 	// BuildOnstart returns: echo '...' > /tmp/script.sh && chmod +x ... && bash ...
 	// Strip the final "&& bash ..." to only write the file without executing
 	if idx := strings.LastIndex(onstart, " && bash "); idx > 0 {
@@ -417,26 +446,100 @@ func (s *DeployService) Restart(id int64) error {
 
 const defaultVolumeSizeGB = 50
 
+// createInstanceWithVolumeRetry resolves the volume for the offer's machine and
+// creates the instance. If vast.ai rejects the call with a stale-volume 404
+// (e.g. the volume was auto-removed by vast.ai or left over from a failed run),
+// it deletes the local DB record and retries once with a freshly rented volume.
+func (s *DeployService) createInstanceWithVolumeRetry(
+	ctx context.Context, offer OfferResult, engine EngineProvider, envVars map[string]string,
+	onstart string, noVolume bool,
+) (instanceID int, volumeID int, mountPath string, err error) {
+	var reused bool
+	if !noVolume {
+		volumeID, mountPath, reused, err = s.ensureVolume(ctx, offer, engine.VolumeMountPath())
+		if err != nil {
+			return 0, 0, "", err
+		}
+	}
+
+	fmt.Println("Creating instance...")
+	instanceID, err = s.vastai.CreateInstance(offer.ID, engine.DockerImage(), envVars, onstart, volumeID, mountPath)
+	if err == nil {
+		return instanceID, volumeID, mountPath, nil
+	}
+
+	// Stale-volume retry: only meaningful when the volume came from the local DB.
+	// A freshly rented volume has already been verified ready, so a 404 there means
+	// something else is wrong and retrying would just orphan more volumes.
+	if !noVolume && reused && volumeID > 0 && isStaleVolumeError(err) {
+		fmt.Printf("Volume V.%d is stale on vast.ai — removing local record and renting a fresh one\n", volumeID)
+		if delErr := s.deleteLocalVolumeByVastaiID(int64(volumeID)); delErr != nil {
+			fmt.Printf("Warning: failed to remove stale volume record: %v\n", delErr)
+		}
+		volumeID, mountPath, _, err = s.ensureVolume(ctx, offer, engine.VolumeMountPath())
+		if err != nil {
+			return 0, 0, "", err
+		}
+		fmt.Println("Creating instance (retry with fresh volume)...")
+		instanceID, err = s.vastai.CreateInstance(offer.ID, engine.DockerImage(), envVars, onstart, volumeID, mountPath)
+		if err != nil {
+			return 0, 0, "", fmt.Errorf("create instance after volume refresh: %w", err)
+		}
+		return instanceID, volumeID, mountPath, nil
+	}
+
+	return 0, 0, "", fmt.Errorf("create instance: %w", err)
+}
+
+// isStaleVolumeError detects vast.ai's 404 response when a volume_id no longer exists.
+func isStaleVolumeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "404") &&
+		strings.Contains(msg, "Volume") &&
+		strings.Contains(msg, "does not exist")
+}
+
+// deleteLocalVolumeByVastaiID removes a volume row from SQLite by its vast.ai ID.
+func (s *DeployService) deleteLocalVolumeByVastaiID(vastaiID int64) error {
+	vols, err := s.volumes.FindAll()
+	if err != nil {
+		return err
+	}
+	for _, v := range vols {
+		if v.VastaiID == vastaiID {
+			return s.volumes.Delete(v.ID)
+		}
+	}
+	return nil
+}
+
 // ensureVolume returns an existing or newly created volume for the offer's machine.
-func (s *DeployService) ensureVolume(offer OfferResult, mountPath string) (int, string, error) {
+// When a new volume is rented, it waits for vast.ai to transition the volume out of
+// "initialized" state before returning, otherwise CreateInstance will reject it.
+// The reused return value is true when an existing local DB row was reused (so the
+// caller can decide whether a subsequent 404 should trigger a stale-row cleanup).
+func (s *DeployService) ensureVolume(ctx context.Context, offer OfferResult, mountPath string) (volumeID int, mount string, reused bool, err error) {
 	// Reuse existing volume on this machine (trust local DB — API doesn't show unattached volumes)
 	vols, _ := s.volumes.FindAll()
 	for _, vol := range vols {
 		if vol.MachineID == offer.MachineID {
 			fmt.Printf("Using existing volume %s on machine %d\n", vol.VolumeName, vol.MachineID)
-			return int(vol.VastaiID), vol.MountPath, nil
+			return int(vol.VastaiID), vol.MountPath, true, nil
 		}
 	}
 
 	// Create new volume
 	if offer.AvailVolAskID == nil {
-		return 0, "", fmt.Errorf("machine %d has no volume offer", offer.MachineID)
+		return 0, "", false, fmt.Errorf("machine %d has no volume offer", offer.MachineID)
 	}
 
 	fmt.Printf("Creating volume (%d GB) on machine %d...\n", defaultVolumeSizeGB, offer.MachineID)
 	result, err := s.vastai.RentVolume(*offer.AvailVolAskID, defaultVolumeSizeGB)
 	if err != nil {
-		return 0, "", fmt.Errorf("create volume: %w", err)
+		return 0, "", false, fmt.Errorf("create volume: %w", err)
 	}
 
 	// Parse volume ID from name (e.g. "V.34258398" → 34258398)
@@ -445,7 +548,7 @@ func (s *DeployService) ensureVolume(offer OfferResult, mountPath string) (int, 
 		fmt.Sscanf(result.VolumeName[2:], "%d", &vastaiID)
 	}
 	if vastaiID == 0 {
-		return 0, "", fmt.Errorf("could not parse volume ID from %s", result.VolumeName)
+		return 0, "", false, fmt.Errorf("could not parse volume ID from %s", result.VolumeName)
 	}
 
 	vol := &entity.Volume{
@@ -456,10 +559,14 @@ func (s *DeployService) ensureVolume(offer OfferResult, mountPath string) (int, 
 		MachineID:  offer.MachineID,
 	}
 	if err := s.volumes.Save(vol); err != nil {
-		return 0, "", fmt.Errorf("save volume: %w", err)
+		return 0, "", false, fmt.Errorf("save volume: %w", err)
 	}
 
 	fmt.Printf("Volume %s created on machine %d\n", result.VolumeName, offer.MachineID)
-	return vastaiID, mountPath, nil
+	fmt.Println("Waiting for volume to leave 'initialized' state...")
+	if err := s.vastai.WaitForVolumeReady(ctx, vastaiID); err != nil {
+		return 0, "", false, fmt.Errorf("wait for volume ready: %w", err)
+	}
+	return vastaiID, mountPath, false, nil
 }
 

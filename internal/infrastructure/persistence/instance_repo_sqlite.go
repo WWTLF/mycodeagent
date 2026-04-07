@@ -20,10 +20,10 @@ func NewSQLiteInstanceRepository(db *sql.DB) *SQLiteInstanceRepository {
 
 func (r *SQLiteInstanceRepository) Save(inst *entity.Instance) error {
 	result, err := r.db.Exec(
-		`INSERT INTO instances (vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, volume_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO instances (vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, volume_id, num_gpus)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inst.VastaiID, inst.ModelName, inst.Status, inst.LocalPort,
-		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.VolumeID,
+		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.VolumeID, inst.NumGPUs,
 	)
 	if err != nil {
 		return err
@@ -55,9 +55,9 @@ func (r *SQLiteInstanceRepository) FindRunning() ([]*entity.Instance, error) {
 func (r *SQLiteInstanceRepository) Update(inst *entity.Instance) error {
 	_, err := r.db.Exec(
 		`UPDATE instances SET vastai_id=?, model_name=?, status=?, local_port=?,
-		 ssh_host=?, ssh_port=?, tunnel_pid=?, hourly_rate=?, volume_id=? WHERE id=?`,
+		 ssh_host=?, ssh_port=?, tunnel_pid=?, hourly_rate=?, volume_id=?, num_gpus=? WHERE id=?`,
 		inst.VastaiID, inst.ModelName, inst.Status, inst.LocalPort,
-		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.VolumeID, inst.ID,
+		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.VolumeID, inst.NumGPUs, inst.ID,
 	)
 	return err
 }
@@ -89,7 +89,7 @@ func (r *SQLiteInstanceRepository) scanMany(query string, args ...any) ([]*entit
 		err := rows.Scan(
 			&inst.ID, &inst.VastaiID, &inst.ModelName, &inst.Status,
 			&inst.LocalPort, &inst.SSHHost, &inst.SSHPort, &inst.TunnelPID,
-			&inst.HourlyRate, &inst.CreatedAt, &inst.VolumeID,
+			&inst.HourlyRate, &inst.CreatedAt, &inst.VolumeID, &inst.NumGPUs,
 		)
 		if err != nil {
 			return nil, err
@@ -108,7 +108,7 @@ func scanInstance(row scannable) (*entity.Instance, error) {
 	err := row.Scan(
 		&inst.ID, &inst.VastaiID, &inst.ModelName, &inst.Status,
 		&inst.LocalPort, &inst.SSHHost, &inst.SSHPort, &inst.TunnelPID,
-		&inst.HourlyRate, &inst.CreatedAt, &inst.VolumeID,
+		&inst.HourlyRate, &inst.CreatedAt, &inst.VolumeID, &inst.NumGPUs,
 	)
 	return &inst, err
 }

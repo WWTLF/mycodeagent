@@ -31,65 +31,73 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 				remoteMap[int64(ri.ID)] = ri
 			}
 
-			// Get all local records
-			localInstances, _ := app.Instances.FindAll()
-
-			// 1. Update or delete existing local records; deduplicate by vastai_id
-			seen := make(map[int64]bool)
-			for _, local := range localInstances {
-				remote, exists := remoteMap[local.VastaiID]
-				if !exists || seen[local.VastaiID] {
-					// Gone from vast.ai or duplicate — delete
-					app.Instances.Delete(local.ID)
+			// Reconcile: for every remote instance, UPSERT into SQLite keyed on vastai_id.
+			// Never delete rows just because ListInstances succeeds — a transient API hiccup
+			// shouldn't wipe local tunnel/port state. Rows for instances that truly vanished
+			// from vast.ai are cleaned up by `kill` / explicit commands.
+			localInstances, err := app.Instances.FindAll()
+			if err != nil {
+				return fmt.Errorf("read local instances: %w", err)
+			}
+			localByVastID := make(map[int64]*entity.Instance, len(localInstances))
+			dupes := make(map[int64][]int64) // vastai_id → extra local ids to drop
+			for _, li := range localInstances {
+				if existing, ok := localByVastID[li.VastaiID]; ok {
+					// Historical duplicate row for the same vast.ai instance — schedule for deletion.
+					dupes[li.VastaiID] = append(dupes[li.VastaiID], li.ID)
+					// Keep whichever row has more useful state (tunnel info wins).
+					if li.LocalPort > 0 && existing.LocalPort == 0 {
+						dupes[li.VastaiID] = append(dupes[li.VastaiID], existing.ID)
+						localByVastID[li.VastaiID] = li
+					}
 					continue
 				}
-				seen[local.VastaiID] = true
-				// Update status and SSH info from remote, preserve tunnel info
-				// Prefer cur_state over actual_status when they disagree
-				status := remote.ActualStatus
-				if remote.CurState == "stopped" || remote.CurState == "exited" {
-					status = remote.CurState
+				localByVastID[li.VastaiID] = li
+			}
+			// Drop historical duplicates so we stop printing the same instance N times.
+			for _, ids := range dupes {
+				for _, id := range ids {
+					app.Instances.Delete(id)
 				}
-				if remote.StatusMsg != "" {
-					status = fmt.Sprintf("%s (%s)", status, remote.StatusMsg)
-				}
-				local.Status = entity.InstanceStatus(status)
-				if remote.SSHHost != "" {
-					local.SSHHost = remote.SSHHost
-				}
-				if p := remote.GetSSHPort(); p > 0 {
-					local.SSHPort = p
-				}
-				local.HourlyRate = remote.DPHTotal
-				app.Instances.Update(local)
 			}
 
-			// 2. Add new remote instances not in local DB
-			localInstances, _ = app.Instances.FindAll()
-			localVastIDs := make(map[int64]bool)
-			for _, li := range localInstances {
-				localVastIDs[li.VastaiID] = true
-			}
 			for _, ri := range remoteInstances {
 				vastID := int64(ri.ID)
-				if !localVastIDs[vastID] {
-					modelName := detectModelFromOnstart(ri.Onstart, app)
-					status := ri.ActualStatus
-					if ri.CurState == "stopped" || ri.CurState == "exited" {
-						status = ri.CurState
+				status := ri.ActualStatus
+				if ri.CurState == "stopped" || ri.CurState == "exited" {
+					status = ri.CurState
+				}
+				if ri.StatusMsg != "" {
+					status = fmt.Sprintf("%s (%s)", status, ri.StatusMsg)
+				}
+
+				if local, ok := localByVastID[vastID]; ok {
+					// UPDATE existing row — preserve tunnel fields we own locally.
+					local.Status = entity.InstanceStatus(status)
+					if ri.SSHHost != "" {
+						local.SSHHost = ri.SSHHost
 					}
-					if ri.StatusMsg != "" {
-						status = fmt.Sprintf("%s (%s)", status, ri.StatusMsg)
+					if p := ri.GetSSHPort(); p > 0 {
+						local.SSHPort = p
 					}
-					inst := &entity.Instance{
-						VastaiID:   vastID,
-						ModelName:  modelName,
-						Status:     entity.InstanceStatus(status),
-						SSHHost:    ri.SSHHost,
-						SSHPort:    ri.GetSSHPort(),
-						HourlyRate: ri.DPHTotal,
+					local.HourlyRate = ri.DPHTotal
+					if err := app.Instances.Update(local); err != nil {
+						fmt.Fprintf(os.Stderr, "update instance %d: %v\n", local.ID, err)
 					}
-					app.Instances.Save(inst)
+					continue
+				}
+
+				// INSERT new row.
+				inst := &entity.Instance{
+					VastaiID:   vastID,
+					ModelName:  detectModelFromOnstart(ri.Onstart, app),
+					Status:     entity.InstanceStatus(status),
+					SSHHost:    ri.SSHHost,
+					SSHPort:    ri.GetSSHPort(),
+					HourlyRate: ri.DPHTotal,
+				}
+				if err := app.Instances.Save(inst); err != nil {
+					fmt.Fprintf(os.Stderr, "save instance %d: %v\n", vastID, err)
 				}
 			}
 

@@ -42,8 +42,9 @@ func migrate(db *sql.DB) error {
 			ssh_port    INTEGER,
 			tunnel_pid  INTEGER,
 			hourly_rate REAL,
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			volume_id   INTEGER NOT NULL DEFAULT 0,
-			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			num_gpus    INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS volumes (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,5 +61,7 @@ func migrate(db *sql.DB) error {
 	}
 	// Migration: add volume_id column if missing (existing DBs)
 	db.Exec("ALTER TABLE instances ADD COLUMN volume_id INTEGER NOT NULL DEFAULT 0")
+	// Migration: add num_gpus column so restart can re-emit the right --tensor-parallel-size
+	db.Exec("ALTER TABLE instances ADD COLUMN num_gpus INTEGER NOT NULL DEFAULT 0")
 	return nil
 }

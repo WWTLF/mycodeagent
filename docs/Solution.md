@@ -87,9 +87,24 @@ sequenceDiagram
     VastAI-->>VastaiProvider: Sorted offers
     VastaiProvider-->>DeployService: Cheapest offer
 
-    DeployService->>DeployService: ensureVolume(offer, mountPath)
+    DeployService->>DeployService: ensureVolume(ctx, offer, mountPath)
+    alt New volume
+        DeployService->>VastaiProvider: RentVolume(askID, sizeGB)
+        VastaiProvider->>VastAI: PUT /volumes/
+        VastAI-->>VastaiProvider: volume_name
+        DeployService->>VastaiProvider: WaitForVolumeReady(ctx, volumeID)
+        loop Poll /volumes/ every 5s
+            VastaiProvider->>VastAI: GET /volumes/
+            Note over VastaiProvider: until status != "initialized"
+        end
+    else Reused from SQLite
+        Note over DeployService: trust local row, no API call
+    end
     DeployService->>VastaiProvider: CreateInstance(offerID, image, env, onstart, volumeID)
     VastaiProvider->>VastAI: PUT /asks/{id}
+    alt 404 "Volume X does not exist" AND volume was reused
+        Note over DeployService: stale local row — drop it,<br/>re-rent + WaitForVolumeReady, retry once
+    end
     VastAI-->>VastaiProvider: instanceID
     VastaiProvider-->>DeployService: instanceID
 
@@ -155,7 +170,7 @@ graph LR
 | `qwen3-vl-32b-instruct-awq` | coder_vl | vLLM | 2x GPU | 15 min |
 | `qwen25-32b-instruct-awq` | writer | vLLM | 2x GPU | 15 min |
 | `dolphin-glm-24b` | rude | vLLM | 2x GPU | 15 min |
-| `qwen25-coder-32b-gguf` | coder-2 | LM Studio | 1x GPU (24 GB) | 15 min |
+| `qwen3-5-35b-a3b-gguf` | coder-2 | LM Studio | 2x GPU (24 GB) | 15 min |
 
 Bigger models (multi-GPU, larger downloads) get longer timeouts. If `StartupTimeout` is unset, the default is **10 minutes**.
 
@@ -165,15 +180,22 @@ Volumes provide persistent storage for model caching across instance restarts.
 
 ```mermaid
 flowchart TD
-    INIT["init <model>"] --> CHECK{"Volume exists<br/>for this machine?"}
-    CHECK -->|Yes| ATTACH["Attach existing volume"]
+    INIT["init <model>"] --> CHECK{"Volume exists<br/>in SQLite for<br/>this machine?"}
+    CHECK -->|Yes, reused| ATTACH["Use existing volume_id"]
     CHECK -->|No| CREATE["RentVolume via API"]
     CREATE --> PARSE["Parse ID from name<br/>V.123456 → 123456"]
     PARSE --> SAVE["Save to SQLite"]
-    SAVE --> ATTACH
-    ATTACH --> INSTANCE["Create instance<br/>with volume_info"]
+    SAVE --> WAITREADY["WaitForVolumeReady<br/>poll /volumes/ every 5s<br/>until status != initialized"]
+    WAITREADY --> ATTACH
+    ATTACH --> INSTANCE["CreateInstance<br/>with volume_info"]
 
-    INSTANCE --> POLL["WaitForInstance loop"]
+    INSTANCE --> CREATEOK{"Created OK?"}
+    CREATEOK -->|Yes| POLL["WaitForInstance loop"]
+    CREATEOK -->|404 'Volume does not exist'| STALECHECK{"Was the volume<br/>reused from SQLite?"}
+    STALECHECK -->|Yes| DROP["Drop stale local row<br/>+ re-rent + retry once"]
+    DROP --> CREATE
+    STALECHECK -->|No, freshly rented| FAIL["Fail — surface error"]
+
     POLL --> VOLCHECK{"Volume still<br/>exists? (API)"}
     VOLCHECK -->|Yes| CONTINUE["Continue polling"]
     VOLCHECK -->|No| DESTROY["Destroy instance<br/>+ clean up DB"]
@@ -183,9 +205,13 @@ flowchart TD
 
     style DESTROY fill:#d00,color:#fff
     style KILLVOL fill:#d00,color:#fff
+    style FAIL fill:#d00,color:#fff
+    style WAITREADY fill:#2d6a4f,color:#fff
 ```
 
 - Volumes are created per-machine and tracked in SQLite (`volume_id` on instance)
+- New volumes start in vast.ai's `initialized` state — `CreateInstance` rejects them with a misleading 404 `"Volume X does not exist"` until the status transitions, so `ensureVolume` blocks on `WaitForVolumeReady` after every fresh `RentVolume`
+- The 404-on-`CreateInstance` retry only fires when the volume came from a **reused** SQLite row (a freshly rented volume has already been verified ready, so a 404 there indicates a real failure, not staleness — retrying would just orphan more volumes)
 - `volume list` calls `GET /api/v0/volumes/` and removes stale local records
 - `kill` destroys both the instance and its associated volume
 - During `WaitForInstance`, volume existence is verified on each poll; if gone, instance is destroyed

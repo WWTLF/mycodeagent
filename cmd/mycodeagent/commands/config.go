@@ -12,11 +12,9 @@ import (
 )
 
 func NewConfigCmd(app *application.App) *cobra.Command {
-	var dir string
-
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Update opencode.jsonc with all running instances",
+		Short: "Update the userwide opencode config with all running instances",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			instances, err := app.Instances.FindRunning()
 			if err != nil {
@@ -26,7 +24,15 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				return fmt.Errorf("no running instances with tunnels — deploy first with 'mycodeagent init'")
 			}
 
-			configPath := filepath.Join(dir, "opencode.jsonc")
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolve home dir: %w", err)
+			}
+			configDir := filepath.Join(home, ".config", "opencode")
+			if err := os.MkdirAll(configDir, 0o755); err != nil {
+				return fmt.Errorf("create %s: %w", configDir, err)
+			}
+			configPath := filepath.Join(configDir, "opencode.jsonc")
 
 			// Load existing config or start fresh
 			cfg := make(map[string]any)
@@ -63,11 +69,7 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				maxModelLen := 0
 				if m, err := app.Models.FindByName(inst.ModelName); err == nil {
 					hfRepo = m.HFRepo
-					for i, arg := range m.VLLMArgs {
-						if arg == "--max-model-len" && i+1 < len(m.VLLMArgs) {
-							fmt.Sscanf(m.VLLMArgs[i+1], "%d", &maxModelLen)
-						}
-					}
+					maxModelLen = m.ContextLength
 				}
 
 				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
@@ -117,7 +119,6 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&dir, "dir", "d", ".", "Directory to write opencode.jsonc")
 	return cmd
 }
 
