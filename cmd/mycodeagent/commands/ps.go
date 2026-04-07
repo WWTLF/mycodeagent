@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -32,9 +33,9 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 			}
 
 			// Reconcile: for every remote instance, UPSERT into SQLite keyed on vastai_id.
-			// Never delete rows just because ListInstances succeeds — a transient API hiccup
-			// shouldn't wipe local tunnel/port state. Rows for instances that truly vanished
-			// from vast.ai are cleaned up by `kill` / explicit commands.
+			// Local rows that no longer have a matching vast.ai instance are deleted —
+			// ListInstances already returned successfully (err check above), so absence
+			// is authoritative, not a transient API hiccup.
 			localInstances, err := app.Instances.FindAll()
 			if err != nil {
 				return fmt.Errorf("read local instances: %w", err)
@@ -101,6 +102,20 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 				}
 			}
 
+			// Delete local rows for instances that no longer exist on vast.ai.
+			// Also stop any live SSH tunnel PID we still have for them.
+			for _, li := range localByVastID {
+				if _, stillRemote := remoteMap[li.VastaiID]; stillRemote {
+					continue
+				}
+				if li.TunnelPID > 0 {
+					_ = syscall.Kill(li.TunnelPID, syscall.SIGTERM)
+				}
+				if err := app.Instances.Delete(li.ID); err != nil {
+					fmt.Fprintf(os.Stderr, "delete stale instance %d: %v\n", li.ID, err)
+				}
+			}
+
 			// 3. Display
 			localInstances, _ = app.Instances.FindAll()
 			if len(localInstances) == 0 {
@@ -109,8 +124,8 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tMODEL\tVOLUME\tHEALTH\tTUNNEL URL")
-			fmt.Fprintln(w, "--\t-------\t------\t-----\t------\t------\t----------")
+			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tALIAS\tMODEL\tVOLUME\tHEALTH\tTUNNEL URL")
+			fmt.Fprintln(w, "--\t-------\t------\t-----\t-----\t------\t------\t----------")
 
 			for _, inst := range localInstances {
 				tunnelURL := "-"
@@ -128,14 +143,20 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 					}
 				}
 
+				// Look up the alias from the model definition
+				alias := "-"
+				if m, err := app.Models.FindByName(inst.ModelName); err == nil && m.Alias != "" {
+					alias = m.Alias
+				}
+
 				// Extract volume from remote instance's extra_env (e.g. ["-v V.123:/path", "1"])
 				volName := "-"
 				if ri, ok := remoteMap[inst.VastaiID]; ok {
 					volName = extractVolumeName(ri)
 				}
 
-				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\t%s\n",
-					inst.ID, inst.VastaiID, inst.Status, inst.ModelName, volName, health, tunnelURL)
+				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					inst.ID, inst.VastaiID, inst.Status, alias, inst.ModelName, volName, health, tunnelURL)
 			}
 			return w.Flush()
 		},
@@ -143,16 +164,29 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 }
 
 func checkHealth(localPort int) string {
+	// Use /v1/models as a universal OpenAI-compatible probe. vLLM's /health
+	// endpoint works but LM Studio doesn't implement it (it 200s everything
+	// unknown with an error body), so /health alone gives false positives.
+	// /v1/models is implemented correctly by both and returns a "data" array
+	// containing the loaded model(s). Valid shape ⇒ actually serving.
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/health", localPort))
+	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/v1/models", localPort))
 	if err != nil {
 		return "unreachable"
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == 200 {
-		return "healthy"
+	if resp.StatusCode != 200 {
+		return fmt.Sprintf("unhealthy (%d)", resp.StatusCode)
 	}
-	return fmt.Sprintf("unhealthy (%d)", resp.StatusCode)
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || len(body.Data) == 0 {
+		return "unhealthy"
+	}
+	return "healthy"
 }
 
 func extractVolumeName(ri vastai.InstanceInfo) string {

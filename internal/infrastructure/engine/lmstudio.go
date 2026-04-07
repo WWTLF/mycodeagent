@@ -22,8 +22,12 @@ func (e *LMStudioEngine) BuildOnstart(model *entity.Model, numGPUs, contextLengt
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\nset -e\n")
 
-	// Install LM Studio CLI (llmster)
-	b.WriteString("apt-get update && apt-get install -y curl libatomic1 libgomp1\n")
+	// Install LM Studio CLI + aria2 for parallel GGUF downloads. `lms get` uses
+	// a single HTTP connection with no hf_transfer support, so for a ~14 GB GGUF
+	// on a multi-gigabit host it leaves most of the bandwidth on the floor.
+	// aria2c -x 16 opens 16 parallel range requests against HF's CDN, typically
+	// 5-10x faster on well-connected vast.ai hosts.
+	b.WriteString("apt-get update && apt-get install -y curl aria2 libatomic1 libgomp1\n")
 	b.WriteString("curl -fsSL https://lmstudio.ai/install.sh | bash\n")
 	b.WriteString("export PATH=\"$HOME/.lmstudio/bin:$PATH\"\n\n")
 
@@ -31,12 +35,16 @@ func (e *LMStudioEngine) BuildOnstart(model *entity.Model, numGPUs, contextLengt
 	// in headless containers; without it `lms daemon up` times out.
 	b.WriteString("lms bootstrap\n")
 	b.WriteString("lms daemon up\n")
-	quant := extractQuant(model.GGUFFile)
-	if quant != "" {
-		fmt.Fprintf(&b, "lms get 'https://huggingface.co/%s@%s' --yes\n", model.HFRepo, quant)
-	} else {
-		fmt.Fprintf(&b, "lms get 'https://huggingface.co/%s' --yes\n", model.HFRepo)
-	}
+
+	// Download GGUF directly into LM Studio's cache dir so `lms load` finds it
+	// without needing `lms get`. Layout: /root/.lmstudio/models/{org}/{repo}/{file}.gguf
+	modelDir := fmt.Sprintf("/root/.lmstudio/models/%s", model.HFRepo)
+	downloadURL := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", model.HFRepo, model.GGUFFile)
+	fmt.Fprintf(&b, "mkdir -p '%s'\n", modelDir)
+	fmt.Fprintf(&b, "if [ ! -f '%s/%s' ]; then\n", modelDir, model.GGUFFile)
+	fmt.Fprintf(&b, "  aria2c -x 16 -s 16 -k 1M --continue=true --max-tries=5 --retry-wait=5 --file-allocation=none --console-log-level=warn --summary-interval=10 -d '%s' -o '%s' '%s'\n",
+		modelDir, model.GGUFFile, downloadURL)
+	b.WriteString("fi\n")
 	// lms stores models with lowercase short names; load the first available LLM.
 	// contextLength is the runtime value computed by DeployService (scaled for the offer);
 	// fall back to the model's baseline if the caller didn't pass one.

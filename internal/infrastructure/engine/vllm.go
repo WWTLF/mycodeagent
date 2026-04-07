@@ -19,7 +19,10 @@ func (e *VLLMEngine) DockerImage() string {
 
 func (e *VLLMEngine) BuildOnstart(model *entity.Model, numGPUs, contextLength int, hfToken string) string {
 	vllmCmd := e.buildServeCommand(model, numGPUs, contextLength)
-	return fmt.Sprintf("echo '%s' > /tmp/start_vllm.sh && chmod +x /tmp/start_vllm.sh && bash /tmp/start_vllm.sh 2>&1 | tee /tmp/vllm.log", vllmCmd)
+	// Escape single quotes so the script survives being wrapped in `echo '...'`.
+	// Needed for args that contain single-quoted values (e.g. --hf-overrides with a JSON blob).
+	escaped := strings.ReplaceAll(vllmCmd, "'", `'\''`)
+	return fmt.Sprintf("echo '%s' > /tmp/start_vllm.sh && chmod +x /tmp/start_vllm.sh && bash /tmp/start_vllm.sh 2>&1 | tee /tmp/vllm.log", escaped)
 }
 
 func (e *VLLMEngine) BuildRawCommand(model *entity.Model, numGPUs, contextLength int) string {

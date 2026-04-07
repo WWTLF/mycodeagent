@@ -10,9 +10,9 @@ import (
 
 var defaultModels = []*entity.Model{
 	{
-		Name:             "qwen3-32b-awq",
+		Name:             "qwen25-coder-32b-awq",
 		Alias:            "coder",
-		HFRepo:           "Qwen/Qwen3-32B-AWQ",
+		HFRepo:           "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
 		Category:         entity.CategoryCoding,
 		VRAM:             24,
 		NumGPUs:          2,
@@ -24,7 +24,6 @@ var defaultModels = []*entity.Model{
 			"--dtype", "half",
 			"--enable-auto-tool-choice",
 			"--tool-call-parser", "hermes",
-			"--reasoning-parser", "deepseek_r1",
 			"--gpu-memory-utilization", "0.85",
 			"--trust-remote-code",
 			"--enable-prefix-caching",

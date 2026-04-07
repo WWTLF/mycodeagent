@@ -65,11 +65,21 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 					continue
 				}
 
+				// Default: HF repo from the static catalog.
 				hfRepo := inst.ModelName
 				maxModelLen := 0
 				if m, err := app.Models.FindByName(inst.ModelName); err == nil {
 					hfRepo = m.HFRepo
 					maxModelLen = m.ContextLength
+				}
+
+				// Authoritative model ID: ask the server directly. vLLM reports
+				// the HF repo (matching the static entry), but LM Studio reports
+				// the lowercased GGUF filename — if we use the static HFRepo for
+				// LM Studio instances, opencode sends model=... and gets "model
+				// not found". Always prefer what the server actually answers to.
+				if served := detectModel(inst.LocalPort); served != "" {
+					hfRepo = served
 				}
 
 				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
