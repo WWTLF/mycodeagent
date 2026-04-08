@@ -5,120 +5,29 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
-	"github.com/WWTLF/mycodeagent/internal/domain/entity"
-	"github.com/WWTLF/mycodeagent/internal/infrastructure/vastai"
 	"github.com/spf13/cobra"
 )
 
-func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command {
+func NewPsCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "ps",
 		Short: "List deployed instances",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			remoteInstances, err := vastaiClient.ListInstances()
+			ctx := cmd.Context()
+
+			// SyncInstances pulls from vast.ai, reconciles with the local DB,
+			// and returns the reconciled list. All the dedupe / insert / delete
+			// / update logic that used to be inlined here lives in
+			// InstanceService.Sync now.
+			instances, err := app.SyncInstances(ctx)
 			if err != nil {
-				return fmt.Errorf("fetch instances from vast.ai: %w", err)
+				return err
 			}
-
-			// Build remote lookup
-			remoteMap := make(map[int64]vastai.InstanceInfo)
-			for _, ri := range remoteInstances {
-				remoteMap[int64(ri.ID)] = ri
-			}
-
-			// Reconcile: for every remote instance, UPSERT into SQLite keyed on vastai_id.
-			// Local rows that no longer have a matching vast.ai instance are deleted —
-			// ListInstances already returned successfully (err check above), so absence
-			// is authoritative, not a transient API hiccup.
-			localInstances, err := app.Instances.FindAll()
-			if err != nil {
-				return fmt.Errorf("read local instances: %w", err)
-			}
-			localByVastID := make(map[int64]*entity.Instance, len(localInstances))
-			dupes := make(map[int64][]int64) // vastai_id → extra local ids to drop
-			for _, li := range localInstances {
-				if existing, ok := localByVastID[li.VastaiID]; ok {
-					// Historical duplicate row for the same vast.ai instance — schedule for deletion.
-					dupes[li.VastaiID] = append(dupes[li.VastaiID], li.ID)
-					// Keep whichever row has more useful state (tunnel info wins).
-					if li.LocalPort > 0 && existing.LocalPort == 0 {
-						dupes[li.VastaiID] = append(dupes[li.VastaiID], existing.ID)
-						localByVastID[li.VastaiID] = li
-					}
-					continue
-				}
-				localByVastID[li.VastaiID] = li
-			}
-			// Drop historical duplicates so we stop printing the same instance N times.
-			for _, ids := range dupes {
-				for _, id := range ids {
-					app.Instances.Delete(id)
-				}
-			}
-
-			for _, ri := range remoteInstances {
-				vastID := int64(ri.ID)
-				status := ri.ActualStatus
-				if ri.CurState == "stopped" || ri.CurState == "exited" {
-					status = ri.CurState
-				}
-				if ri.StatusMsg != "" {
-					status = fmt.Sprintf("%s (%s)", status, ri.StatusMsg)
-				}
-
-				if local, ok := localByVastID[vastID]; ok {
-					// UPDATE existing row — preserve tunnel fields we own locally.
-					local.Status = entity.InstanceStatus(status)
-					if ri.SSHHost != "" {
-						local.SSHHost = ri.SSHHost
-					}
-					if p := ri.GetSSHPort(); p > 0 {
-						local.SSHPort = p
-					}
-					local.HourlyRate = ri.DPHTotal
-					if err := app.Instances.Update(local); err != nil {
-						fmt.Fprintf(os.Stderr, "update instance %d: %v\n", local.ID, err)
-					}
-					continue
-				}
-
-				// INSERT new row.
-				inst := &entity.Instance{
-					VastaiID:   vastID,
-					ModelName:  detectModelFromOnstart(ri.Onstart, app),
-					Status:     entity.InstanceStatus(status),
-					SSHHost:    ri.SSHHost,
-					SSHPort:    ri.GetSSHPort(),
-					HourlyRate: ri.DPHTotal,
-				}
-				if err := app.Instances.Save(inst); err != nil {
-					fmt.Fprintf(os.Stderr, "save instance %d: %v\n", vastID, err)
-				}
-			}
-
-			// Delete local rows for instances that no longer exist on vast.ai.
-			// Also stop any live SSH tunnel PID we still have for them.
-			for _, li := range localByVastID {
-				if _, stillRemote := remoteMap[li.VastaiID]; stillRemote {
-					continue
-				}
-				if li.TunnelPID > 0 {
-					_ = syscall.Kill(li.TunnelPID, syscall.SIGTERM)
-				}
-				if err := app.Instances.Delete(li.ID); err != nil {
-					fmt.Fprintf(os.Stderr, "delete stale instance %d: %v\n", li.ID, err)
-				}
-			}
-
-			// 3. Display
-			localInstances, _ = app.Instances.FindAll()
-			if len(localInstances) == 0 {
+			if len(instances) == 0 {
 				fmt.Println("No instances.")
 				return nil
 			}
@@ -127,7 +36,7 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tALIAS\tMODEL\tVOLUME\tHEALTH\tTUNNEL URL")
 			fmt.Fprintln(w, "--\t-------\t------\t-----\t-----\t------\t------\t----------")
 
-			for _, inst := range localInstances {
+			for _, inst := range instances {
 				tunnelURL := "-"
 				health := "-"
 				if inst.LocalPort > 0 {
@@ -135,24 +44,23 @@ func NewPsCmd(app *application.App, vastaiClient *vastai.Client) *cobra.Command 
 					health = checkHealth(inst.LocalPort)
 				}
 
-				// Try to detect model via vLLM API if unknown and tunnel is up
+				// Try to detect model via vLLM API if unknown and tunnel is up.
 				if inst.ModelName == "unknown" && inst.LocalPort > 0 {
-					if detected := detectModel(inst.LocalPort); detected != "" {
+					if detected, _, _ := app.GetServedModelInfo(ctx, inst.LocalPort); detected != "" {
 						inst.ModelName = detected
-						app.Instances.Update(inst)
+						_ = app.UpdateInstance(ctx, inst)
 					}
 				}
 
-				// Look up the alias from the model definition
+				// Look up the alias from the model definition.
 				alias := "-"
-				if m, err := app.Models.FindByName(inst.ModelName); err == nil && m.Alias != "" {
+				if m, err := app.FindModelByName(inst.ModelName); err == nil && m.Alias != "" {
 					alias = m.Alias
 				}
 
-				// Extract volume from remote instance's extra_env (e.g. ["-v V.123:/path", "1"])
-				volName := "-"
-				if ri, ok := remoteMap[inst.VastaiID]; ok {
-					volName = extractVolumeName(ri)
+				volName := inst.VolumeName
+				if volName == "" {
+					volName = "-"
 				}
 
 				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
@@ -187,56 +95,4 @@ func checkHealth(localPort int) string {
 		return "unhealthy"
 	}
 	return "healthy"
-}
-
-func extractVolumeName(ri vastai.InstanceInfo) string {
-	for _, env := range ri.ExtraEnv {
-		if len(env) > 0 && strings.HasPrefix(env[0], "-v ") {
-			// "-v V.123456:/mount/path" → "V.123456"
-			vol := strings.TrimPrefix(env[0], "-v ")
-			if idx := strings.Index(vol, ":"); idx > 0 {
-				return vol[:idx]
-			}
-			return vol
-		}
-	}
-	return "-"
-}
-
-func detectModelFromOnstart(onstart string, app *application.App) string {
-	models, _ := app.Models.FindAll()
-	for _, m := range models {
-		if strings.Contains(onstart, m.HFRepo) {
-			return m.Name
-		}
-	}
-	if idx := strings.Index(onstart, "vllm serve '"); idx >= 0 {
-		rest := onstart[idx+len("vllm serve '"):]
-		if end := strings.Index(rest, "'"); end >= 0 {
-			return rest[:end]
-		}
-	}
-	return "unknown"
-}
-
-func detectModel(localPort int) string {
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/v1/models", localPort))
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return ""
-	}
-	if len(result.Data) > 0 {
-		return result.Data[0].ID
-	}
-	return ""
 }

@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-`mycodeagent` is a Go CLI tool that deploys and manages vLLM-based coding/writing models on [vast.ai](https://vast.ai). It abstracts the vast.ai API, vLLM startup, SSH tunnel management, and lifecycle operations.
+`mycodeagent` is a Go CLI tool that deploys and manages vLLM- and LM Studio-based coding/writing models on [vast.ai](https://vast.ai). It abstracts the vast.ai API, model-server startup, SSH tunnel management, and lifecycle operations.
 
 ## Layer Architecture
 
@@ -14,15 +14,16 @@ The project follows **DDD / SOLID / Clean Architecture** with strict layering:
 Application Service    → orchestrates use cases (init, stop, pull)
   └─> App struct with domain repository dependencies
 Domain
-  └─> Service               → business logic (VLLM deploy lifecycle)
+  └─> Service               → business logic (instance deploy lifecycle)
   └─> Entity                → core models (Instance, Model)
   └─> Repository interface   → contracts only
 Infrastructure
-  ├─> Repository impl       → SQLite (~/.mycodeagent/sqlite/), vast.ai API client
+  ├─> Repository impl       → SQLite (~/.mycodeagent/mycodeagent.db), vast.ai API client
   └─> API impl              → SSH/tunnel operations, HTTP to vast.ai
 ```
 
-**Domain layer must have zero external imports** (no stdlib Go packages except time).
+**Domain layer must not depend on infrastructure packages or external SDK clients.**
+Domain entities should stay minimal; `time` is allowed for timestamps.
 
 ## Build & Run
 
@@ -83,7 +84,7 @@ Run before committing or pushing: `go build -o mycodeagent ./cmd/mycodeagent && 
 | Packages      | lowercase     | `internal/domain/entity`  |
 | Structs       | PascalCase    | `Instance`, `DeployService` |
 | Interfaces    | PascalCase    | `VastaiProvider`          |
-| Variables     | lower_snake   | `dbPath`, `localPort`     |
+| Variables     | lowerCamel    | `dbPath`, `localPort`     |
 | Functions     | verb+Noun     | `OpenDB`, `SearchOffers`  |
 | Private funcs | CamelCase (Go convention) / lowercase for single char |
 
@@ -94,7 +95,7 @@ Enums are capitalized consts: `StatusRunning Status = "running"`, not "RUNNING".
 ### Types & Structs
 
 - Prefer structs over interfaces when implementation-specific
-- Domain layer uses only **named return values** and `error` type (no panic)
+- Prefer explicit, readable return values and `error` (no panic in domain logic)
 - Interfaces should be minimal: `InstanceRepository interface { ... }` without methods on domain structs that could leak concerns to Infrastructure. 
 - Private fields acceptable; prefer explicit field names for clarity
 
@@ -131,11 +132,11 @@ Don't unwrap errors blindly; propagate context. Never return bare DB or API erro
 
 Use these custom rules:
 - Repository interfaces live in domain layer; implementations belong in infrastructure package
-- Domain structs must not import stdlib Go packages except `time` for timestamps
-- VLLM image (`vllm/vllm-openai:latest`) is the official default; update only if necessary
+- Domain entities should avoid infrastructure dependencies; `time` is allowed for timestamps
+- VLLM image (`vllm/vllm-openai:v0.19.0`) is the current default; update only if necessary
 - HF_TOKEN applies to gated models (Llama 3, some Mistral variants); Qwen3/2.5, GLM-E are public
 - SSH tunnels forward local ports to remote vLLM port 8000; each `init` allocates a new local port for concurrency
-- State is persisted in SQLite at ~/.mycodeagent/sqlite
+- State is persisted in SQLite at ~/.mycodeagent/mycodeagent.db
 
 ## Copilot Instructions (`.github/copilot-instructions.md`)
 
@@ -146,6 +147,6 @@ See `.github/copilot-instructions.md` for detailed Copilot setup instructions sp
 - Model context window for Qwen3-32B-AWQ is ~32K tokens (check [Qwen docs](https://modelscope.cn/models/Qwen3-32B-AWQ/summary) for exact value)
 
 - Base deployment port defaults to 8000; configurable via env or config file
-- Models auto-download from HuggingFace on first launch and cache in `/root/.cache/huggingface/`
-- SSH/tunnel operations use standard Go `github.com/pkg/sftp` conventions for connection management
-- Always pass `&context.Context{}` when making API calls requiring cancellation or timeout
+- vLLM models cache in `/root/.cache/huggingface/`; LM Studio GGUF models cache in `/root/.lmstudio/models/`
+- SSH/tunnel operations shell out to `ssh` and manage lifecycle via process PID + TCP/HTTP checks
+- Always pass a real `context.Context` (typically `context.WithTimeout` or `context.WithCancel`), never `&context.Context{}`

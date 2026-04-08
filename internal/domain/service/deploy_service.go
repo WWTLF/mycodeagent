@@ -12,16 +12,33 @@ import (
 
 // VastaiProvider abstracts vast.ai API operations for the domain layer.
 type VastaiProvider interface {
+	// Offer / instance lifecycle (used by DeployService)
 	SearchOffers(minGPURAM int, numGPUs int) ([]OfferResult, error)
 	CreateInstance(offerID int, image string, envVars map[string]string, onstart string, volumeID int, mountPath string) (instanceID int, err error)
 	WaitForInstance(ctx context.Context, instanceID int, volumeID int) (sshHost string, sshPort int, hourlyRate float64, err error)
 	StopInstance(instanceID int) error
 	DestroyInstance(instanceID int) error
+
+	// Volume lifecycle (used by DeployService and VolumeService)
 	SearchVolumeOffers(sizeGB int) ([]VolumeOfferResult, error)
 	RentVolume(offerID int, sizeGB int) (*VolumeResult, error)
 	WaitForVolumeReady(ctx context.Context, volumeID int) error
 	ListVolumes() ([]VolumeResult, error)
 	DeleteVolume(volumeID int) error
+
+	// Read-side instance access (used by InstanceService for ps/tunnel/sync flows).
+	// Returns service-package types so domain code never imports infrastructure/vastai.
+	GetInstance(ctx context.Context, vastaiID int) (*RemoteInstance, error)
+	ListRemoteInstances(ctx context.Context) ([]*RemoteInstance, error)
+	GetInstanceLogs(ctx context.Context, vastaiID int, tail string) ([]byte, error)
+
+	// Credential operations (used by InstanceService for the login flow).
+	// These take an explicit apiKey because login verifies a key that is NOT
+	// the one the adapter was constructed with — it's a fresh key the user
+	// just typed in. Pass "" to use the adapter's configured key.
+	VerifyAPIKey(ctx context.Context, apiKey string) error
+	ListSSHKeys(ctx context.Context, apiKey string) ([]string, error)
+	CreateSSHKey(ctx context.Context, apiKey string, pubKey string) error
 }
 
 type VolumeOfferResult struct {
@@ -150,23 +167,22 @@ func scaledContextLength(model *entity.Model, offerGPUMemoryMB float64) int {
 
 // Deploy executes the full init flow: find offer → create instance → SSH → vLLM → tunnel.
 // Unless noVolume is true, a volume is auto-created if none exists.
-func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instance, error) {
+func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume bool) (*entity.Instance, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
 	}
 
-	// Use model's startup timeout, default to 10 minutes
 	timeout := model.StartupTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	fmt.Printf("Startup timeout: %s\n", timeout)
 
-	// 1. Find cheapest offer
 	numGPUs := model.NumGPUs
 	if numGPUs <= 0 {
 		numGPUs = 1
@@ -182,8 +198,6 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 	offer := offers[0] // cheapest (already sorted)
 	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
 
-	// 2. Build startup command via engine provider — pass the *actual* GPU count
-	// from the offer and a context length scaled to match the available VRAM.
 	engine := s.engineFor(model)
 	contextLength := scaledContextLength(model, offer.GPUMemory)
 	if contextLength > 0 && contextLength != model.ContextLength {
@@ -198,14 +212,12 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
 	}
 
-	// 3 + 4. Ensure volume + create instance (with stale-volume retry)
 	instanceID, volumeID, _, err := s.createInstanceWithVolumeRetry(ctx, offer, engine, envVars, onstart, noVolume)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Printf("Instance created: %d\n", instanceID)
 
-	// 5. Wait for instance to be running
 	fmt.Println("Waiting for instance to start...")
 	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID, volumeID)
 	if err != nil {
@@ -213,13 +225,11 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 	}
 	fmt.Printf("Instance running: SSH at %s:%d\n", sshHost, sshPort)
 
-	// 6. Wait for SSH
 	fmt.Println("Waiting for SSH...")
 	if err := s.ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
 
-	// 6. Allocate local port and start tunnel
 	localPort, err := s.ssh.FindFreePort(s.basePort)
 	if err != nil {
 		return nil, fmt.Errorf("find free port: %w", err)
@@ -231,7 +241,6 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}
 
-	// 7. Save instance now so ps/tunnel info is available even if health check times out
 	inst := &entity.Instance{
 		VastaiID:   int64(instanceID),
 		ModelName:  model.Name,
@@ -248,7 +257,6 @@ func (s *DeployService) Deploy(modelName string, noVolume bool) (*entity.Instanc
 		return nil, fmt.Errorf("save instance: %w", err)
 	}
 
-	// 8. Wait for vLLM health in a goroutine — stops as soon as healthy or context expires
 	fmt.Println("Waiting for vLLM to become healthy (model downloading, this may take a while)...")
 	healthCh := make(chan error, 1)
 	go func() {
@@ -275,7 +283,7 @@ type CreateOnlyResult struct {
 
 // DeployCreateOnly creates the instance and waits for it to be running, but does not
 // set up the SSH tunnel or wait for vLLM health. Returns the instance with SSH details.
-func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*CreateOnlyResult, error) {
+func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, noVolume bool) (*CreateOnlyResult, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -285,10 +293,10 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// 1. Find cheapest offer
 	numGPUs := model.NumGPUs
 	if numGPUs <= 0 {
 		numGPUs = 1
@@ -304,7 +312,6 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 	offer := offers[0]
 	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
 
-	// 2. Build startup command via engine provider
 	engine := s.engineFor(model)
 	contextLength := scaledContextLength(model, offer.GPUMemory)
 	onstart := engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
@@ -315,21 +322,18 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
 	}
 
-	// 3 + 4. Ensure volume + create instance (with stale-volume retry)
 	instanceID, volumeID, _, err := s.createInstanceWithVolumeRetry(ctx, offer, engine, envVars, onstart, noVolume)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Printf("Instance created: %d\n", instanceID)
 
-	// 5. Wait for instance to be running
 	fmt.Println("Waiting for instance to start...")
 	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID, volumeID)
 	if err != nil {
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
 
-	// 5. Save instance (no tunnel, no health check)
 	inst := &entity.Instance{
 		VastaiID:   int64(instanceID),
 		ModelName:  model.Name,
@@ -348,13 +352,15 @@ func (s *DeployService) DeployCreateOnly(modelName string, noVolume bool) (*Crea
 }
 
 // Stop stops a single instance by local DB ID.
-func (s *DeployService) Stop(id int64) error {
+func (s *DeployService) Stop(ctx context.Context, id int64) error {
 	inst, err := s.instances.FindByID(id)
 	if err != nil {
 		return err
 	}
 
-	s.ssh.StopTunnel(inst.TunnelPID)
+	if err := s.ssh.StopTunnel(inst.TunnelPID); err != nil {
+		fmt.Printf("Warning: failed to stop tunnel: %v\n", err)
+	}
 
 	if err := s.vastai.StopInstance(int(inst.VastaiID)); err != nil {
 		return fmt.Errorf("stop vast.ai instance: %w", err)
@@ -366,19 +372,20 @@ func (s *DeployService) Stop(id int64) error {
 }
 
 // Destroy destroys a single instance and its volumes permanently.
-func (s *DeployService) Destroy(id int64) error {
+func (s *DeployService) Destroy(ctx context.Context, id int64) error {
 	inst, err := s.instances.FindByID(id)
 	if err != nil {
 		return err
 	}
 
-	s.ssh.StopTunnel(inst.TunnelPID)
+	if err := s.ssh.StopTunnel(inst.TunnelPID); err != nil {
+		fmt.Printf("Warning: failed to stop tunnel: %v\n", err)
+	}
 
 	if err := s.vastai.DestroyInstance(int(inst.VastaiID)); err != nil {
 		return fmt.Errorf("destroy vast.ai instance: %w", err)
 	}
 
-	// Delete the associated volume
 	if inst.VolumeID > 0 {
 		vols, _ := s.volumes.FindAll()
 		for _, vol := range vols {
@@ -397,7 +404,7 @@ func (s *DeployService) Destroy(id int64) error {
 }
 
 // Restart regenerates the startup script, kills the running server, and restarts it.
-func (s *DeployService) Restart(id int64) error {
+func (s *DeployService) Restart(ctx context.Context, id int64) error {
 	inst, err := s.instances.FindByID(id)
 	if err != nil {
 		return err
@@ -569,4 +576,3 @@ func (s *DeployService) ensureVolume(ctx context.Context, offer OfferResult, mou
 	}
 	return vastaiID, mountPath, false, nil
 }
-

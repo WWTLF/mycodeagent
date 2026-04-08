@@ -1,36 +1,37 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
-	"github.com/WWTLF/mycodeagent/internal/domain/service"
+	"github.com/WWTLF/mycodeagent/internal/application"
 	"github.com/spf13/cobra"
 )
 
-func NewVolumeCmd(volumeSvc *service.VolumeService) *cobra.Command {
+func NewVolumeCmd(app *application.App) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "volume",
 		Short: "Manage persistent storage volumes",
 	}
 
 	cmd.AddCommand(
-		newVolumeCreateCmd(volumeSvc),
-		newVolumeListCmd(volumeSvc),
-		newVolumeDeleteCmd(volumeSvc),
+		newVolumeCreateCmd(app),
+		newVolumeListCmd(app),
+		newVolumeDeleteCmd(app),
 	)
 
 	return cmd
 }
 
-func newVolumeCreateCmd(volumeSvc *service.VolumeService) *cobra.Command {
+func newVolumeCreateCmd(app *application.App) *cobra.Command {
 	var sizeGB int
 
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a persistent volume for model caching",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vol, err := volumeSvc.Create(sizeGB)
+			vol, err := app.VolumeCreate(context.Background(), sizeGB)
 			if err != nil {
 				return err
 			}
@@ -52,12 +53,12 @@ func newVolumeCreateCmd(volumeSvc *service.VolumeService) *cobra.Command {
 	return cmd
 }
 
-func newVolumeListCmd(volumeSvc *service.VolumeService) *cobra.Command {
+func newVolumeListCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List persistent volumes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vols, err := volumeSvc.List()
+			vols, err := app.VolumeList(context.Background())
 			if err != nil {
 				return err
 			}
@@ -74,7 +75,7 @@ func newVolumeListCmd(volumeSvc *service.VolumeService) *cobra.Command {
 	}
 }
 
-func newVolumeDeleteCmd(volumeSvc *service.VolumeService) *cobra.Command {
+func newVolumeDeleteCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <id>",
 		Short: "Delete a persistent volume",
@@ -84,7 +85,7 @@ func newVolumeDeleteCmd(volumeSvc *service.VolumeService) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid volume ID: %w", err)
 			}
-			if err := volumeSvc.Delete(id); err != nil {
+			if err := app.VolumeDelete(context.Background(), id); err != nil {
 				return err
 			}
 			fmt.Printf("Volume %d deleted.\n", id)

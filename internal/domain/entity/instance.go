@@ -23,5 +23,6 @@ type Instance struct {
 	HourlyRate float64
 	VolumeID   int64
 	NumGPUs    int // actual GPU count from the offer; needed for restart so vLLM keeps the same --tensor-parallel-size
+	VolumeName string // mirrors the vast.ai "V.<id>" name; populated by Sync from ExtraEnv "-v V.123:/mount" entries so ps can render it without re-querying vast.ai
 	CreatedAt  time.Time
 }

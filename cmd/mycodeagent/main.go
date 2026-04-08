@@ -11,6 +11,7 @@ import (
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/config"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/engine"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/persistence"
+	"github.com/WWTLF/mycodeagent/internal/infrastructure/serverprobe"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/ssh"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/vastai"
 	"github.com/spf13/cobra"
@@ -34,15 +35,8 @@ func main() {
 	instanceRepo := persistence.NewSQLiteInstanceRepository(db)
 	volumeRepo := persistence.NewSQLiteVolumeRepository(db)
 
-	app := &application.App{
-		Models:    modelRepo,
-		Instances: instanceRepo,
-		Volumes:   volumeRepo,
-	}
-
 	vastaiAdapter := vastai.NewAdapter(cfg.VastaiAPIKey)
 	sshAdapter := ssh.NewAdapter()
-	vastaiClient := vastai.NewClient(cfg.VastaiAPIKey)
 
 	engines := map[entity.ModelEngine]service.EngineProvider{
 		entity.EngineVLLM:     engine.NewVLLMEngine(),
@@ -56,6 +50,12 @@ func main() {
 	)
 
 	volumeSvc := service.NewVolumeService(volumeRepo, vastaiAdapter)
+	modelSvc := service.NewModelService(modelRepo)
+	probe := serverprobe.New()
+	instanceSvc := service.NewInstanceService(instanceRepo, vastaiAdapter, sshAdapter, probe, modelSvc, cfg.BasePort)
+	credentialStore := config.NewStore()
+
+	app := application.NewApp(deploySvc, volumeSvc, instanceSvc, modelSvc, credentialStore, cfg.VastaiAPIKey, cfg.HFToken)
 
 	rootCmd := &cobra.Command{
 		Use:           "mycodeagent",
@@ -64,26 +64,25 @@ func main() {
 		SilenceErrors: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			verbose, _ := cmd.Flags().GetBool("verbose")
-			vastaiClient.SetVerbose(verbose)
 			vastaiAdapter.SetVerbose(verbose)
 		},
 	}
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "Log all API requests and responses")
 
 	rootCmd.AddCommand(
-		commands.NewLoginCmd(),
+		commands.NewLoginCmd(app),
 		commands.NewModelsCmd(app),
-		commands.NewInitCmd(deploySvc),
-		commands.NewPsCmd(app, vastaiClient),
-		commands.NewStopCmd(deploySvc),
-		commands.NewKillCmd(deploySvc),
+		commands.NewInitCmd(app),
+		commands.NewPsCmd(app),
+		commands.NewStopCmd(app),
+		commands.NewKillCmd(app),
 		commands.NewBudgetCmd(app),
-		commands.NewTunnelCmd(app, vastaiClient, cfg.BasePort),
-		commands.NewLogCmd(app, vastaiClient),
+		commands.NewTunnelCmd(app),
+		commands.NewLogCmd(app),
 		commands.NewInfoCmd(app),
 		commands.NewConfigCmd(app),
-		commands.NewRestartCmd(deploySvc),
-		commands.NewVolumeCmd(volumeSvc),
+		commands.NewRestartCmd(app),
+		commands.NewVolumeCmd(app),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

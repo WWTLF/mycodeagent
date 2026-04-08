@@ -6,8 +6,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
-	"github.com/WWTLF/mycodeagent/internal/infrastructure/config"
-	"github.com/WWTLF/mycodeagent/internal/infrastructure/vastai"
 	"github.com/spf13/cobra"
 )
 
@@ -16,26 +14,20 @@ func NewModelsCmd(app *application.App) *cobra.Command {
 		Use:   "models",
 		Short: "List available models",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			models, err := app.Models.FindAll()
+			ctx := cmd.Context()
+			models, err := app.ListModels()
 			if err != nil {
 				return err
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			// Fetch current cheapest prices if API key is configured
-			cfg, _ := config.Load()
+
+			// Fetch current cheapest prices via the offer search.
 			prices := make(map[string]float64)
-			if cfg != nil && cfg.VastaiAPIKey != "" {
-				client := vastai.NewClient(cfg.VastaiAPIKey)
-				for _, m := range models {
-					numGPUs := m.NumGPUs
-					if numGPUs <= 0 {
-						numGPUs = 1
-					}
-					offers, err := client.SearchOffers(m.VRAM, numGPUs)
-					if err == nil && len(offers) > 0 {
-						prices[m.Name] = offers[0].DPHTotal
-					}
+			for _, m := range models {
+				offers, err := app.SearchOffers(ctx, m)
+				if err == nil && len(offers) > 0 {
+					prices[m.Name] = offers[0].DPHTotal
 				}
 			}
 

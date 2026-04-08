@@ -44,7 +44,8 @@ func migrate(db *sql.DB) error {
 			hourly_rate REAL,
 			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			volume_id   INTEGER NOT NULL DEFAULT 0,
-			num_gpus    INTEGER NOT NULL DEFAULT 0
+			num_gpus    INTEGER NOT NULL DEFAULT 0,
+			volume_name TEXT    NOT NULL DEFAULT ''
 		);
 		CREATE TABLE IF NOT EXISTS volumes (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,5 +64,8 @@ func migrate(db *sql.DB) error {
 	db.Exec("ALTER TABLE instances ADD COLUMN volume_id INTEGER NOT NULL DEFAULT 0")
 	// Migration: add num_gpus column so restart can re-emit the right --tensor-parallel-size
 	db.Exec("ALTER TABLE instances ADD COLUMN num_gpus INTEGER NOT NULL DEFAULT 0")
+	// Migration: add volume_name column so ps can render volume info without
+	// querying vast.ai (Sync populates it from the remote ExtraEnv data).
+	db.Exec("ALTER TABLE instances ADD COLUMN volume_name TEXT NOT NULL DEFAULT ''")
 	return nil
 }

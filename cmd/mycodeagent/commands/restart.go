@@ -1,14 +1,15 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
-	"github.com/WWTLF/mycodeagent/internal/domain/service"
+	"github.com/WWTLF/mycodeagent/internal/application"
 	"github.com/spf13/cobra"
 )
 
-func NewRestartCmd(deploySvc *service.DeployService) *cobra.Command {
+func NewRestartCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "restart <id>",
 		Short: "Restart the model server on a running instance",
@@ -18,7 +19,7 @@ func NewRestartCmd(deploySvc *service.DeployService) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid instance ID: %s", args[0])
 			}
-			return deploySvc.Restart(id)
+			return app.Restart(context.Background(), id)
 		},
 	}
 }

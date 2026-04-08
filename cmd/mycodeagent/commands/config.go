@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
+	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/spf13/cobra"
 )
 
@@ -16,10 +17,19 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 		Use:   "config",
 		Short: "Update the userwide opencode config with all running instances",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			instances, err := app.Instances.FindRunning()
+			ctx := cmd.Context()
+			instances, err := app.ListInstances(ctx)
 			if err != nil {
 				return err
 			}
+			// Filter to running instances
+			var runningInstances []*entity.Instance
+			for _, inst := range instances {
+				if strings.HasPrefix(string(inst.Status), "running") || strings.HasPrefix(string(inst.Status), "starting") {
+					runningInstances = append(runningInstances, inst)
+				}
+			}
+			instances = runningInstances
 			if len(instances) == 0 {
 				return fmt.Errorf("no running instances with tunnels — deploy first with 'mycodeagent init'")
 			}
@@ -68,27 +78,48 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				// Default: HF repo from the static catalog.
 				hfRepo := inst.ModelName
 				maxModelLen := 0
-				if m, err := app.Models.FindByName(inst.ModelName); err == nil {
+				alias := ""
+				if m, err := app.FindModelByName(inst.ModelName); err == nil {
 					hfRepo = m.HFRepo
 					maxModelLen = m.ContextLength
+					alias = m.Alias
 				}
 
-				// Authoritative model ID: ask the server directly. vLLM reports
-				// the HF repo (matching the static entry), but LM Studio reports
-				// the lowercased GGUF filename — if we use the static HFRepo for
-				// LM Studio instances, opencode sends model=... and gets "model
+				// Authoritative model ID AND context length: ask the server directly.
+				// vLLM reports the HF repo (matching the static entry), but LM Studio
+				// reports the lowercased GGUF filename — if we use the static HFRepo
+				// for LM Studio instances, opencode sends model=... and gets "model
 				// not found". Always prefer what the server actually answers to.
-				if served := detectModel(inst.LocalPort); served != "" {
+				//
+				// The served context length is also authoritative: scaledContextLength()
+				// grows model.ContextLength linearly with per-GPU VRAM headroom, so a
+				// rental with fatter GPUs than the catalog minimum will serve a larger
+				// window than the static ContextLength claims. Writing the catalog value
+				// into opencode's limit.context makes opencode refuse prompts that would
+				// actually fit on the server, with the session bricking at compaction
+				// time (pruned=0) and prompt_async failing synchronously with UnknownError.
+				if served, servedMaxLen, _ := app.GetServedModelInfo(ctx, inst.LocalPort); served != "" {
 					hfRepo = served
+					if servedMaxLen > 0 {
+						maxModelLen = servedMaxLen
+					}
 				}
 
 				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
 
-				// Each instance gets its own provider (different ports)
+				// Each instance gets its own provider (different ports).
+				// Include the model alias when available so the provider key
+				// is human-readable (e.g. mycodeagent-coder-23) instead of
+				// just the instance ID.
 				providerName := fmt.Sprintf("mycodeagent-%d", inst.ID)
+				displayName := fmt.Sprintf("mycodeagent %s", inst.ModelName)
+				if alias != "" {
+					providerName = fmt.Sprintf("mycodeagent-%s-%d", alias, inst.ID)
+					displayName = fmt.Sprintf("mycodeagent %s (%s)", alias, inst.ModelName)
+				}
 				providers[providerName] = map[string]any{
 					"npm":  "@ai-sdk/openai-compatible",
-					"name": fmt.Sprintf("mycodeagent %s", inst.ModelName),
+					"name": displayName,
 					"options": map[string]any{
 						"baseURL": baseURL,
 					},

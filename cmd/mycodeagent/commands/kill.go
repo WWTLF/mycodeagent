@@ -1,14 +1,15 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
-	"github.com/WWTLF/mycodeagent/internal/domain/service"
+	"github.com/WWTLF/mycodeagent/internal/application"
 	"github.com/spf13/cobra"
 )
 
-func NewKillCmd(deploySvc *service.DeployService) *cobra.Command {
+func NewKillCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "kill <id>",
 		Short: "Destroy an instance permanently",
@@ -18,7 +19,7 @@ func NewKillCmd(deploySvc *service.DeployService) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid instance ID: %s", args[0])
 			}
-			if err := deploySvc.Destroy(id); err != nil {
+			if err := app.Destroy(context.Background(), id); err != nil {
 				return err
 			}
 			fmt.Printf("Instance %d destroyed.\n", id)

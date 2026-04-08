@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
+	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/spf13/cobra"
 )
 
@@ -16,28 +17,36 @@ func NewInfoCmd(app *application.App) *cobra.Command {
 		Short: "Show how to configure opencode to use deployed models",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Specific instance by ID
+			ctx := cmd.Context()
 			if len(args) == 1 {
 				id, err := strconv.ParseInt(args[0], 10, 64)
 				if err != nil {
 					return fmt.Errorf("invalid instance ID: %s", args[0])
 				}
-				inst, err := app.Instances.FindByID(id)
+				instances, err := app.ListInstances(ctx)
 				if err != nil {
 					return err
 				}
+				var inst *entity.Instance
+				for _, i := range instances {
+					if i.ID == id {
+						inst = i
+						break
+					}
+				}
+				if inst == nil {
+					return fmt.Errorf("instance %d not found", id)
+				}
 				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
-				// Use HF repo as model name (that's what vLLM serves)
 				hfRepo := inst.ModelName
-				if m, err := app.Models.FindByName(inst.ModelName); err == nil {
+				if m, err := app.FindModelByName(inst.ModelName); err == nil {
 					hfRepo = m.HFRepo
 				}
 				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL, hfRepo)
 				return nil
 			}
 
-			// No ID — list all running
-			instances, _ := app.Instances.FindRunning()
+			instances, _ := app.ListInstances(ctx)
 
 			if len(instances) == 0 {
 				fmt.Println("No running instances.")
@@ -46,24 +55,35 @@ func NewInfoCmd(app *application.App) *cobra.Command {
 				return nil
 			}
 
-			if len(instances) == 1 {
-				inst := instances[0]
+			var running []*entity.Instance
+			for _, inst := range instances {
+				if inst.Status == entity.StatusRunning {
+					running = append(running, inst)
+				}
+			}
+
+			if len(running) == 0 {
+				fmt.Println("No running instances.")
+				return nil
+			}
+
+			if len(running) == 1 {
+				inst := running[0]
 				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
 				hfRepo := inst.ModelName
-				if m, err := app.Models.FindByName(inst.ModelName); err == nil {
+				if m, err := app.FindModelByName(inst.ModelName); err == nil {
 					hfRepo = m.HFRepo
 				}
 				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL, hfRepo)
 				return nil
 			}
 
-			// Multiple — show list, ask to pick one
 			fmt.Println("Multiple running instances. Use 'mycodeagent info <id>' for specific config:")
 			fmt.Println()
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "  ID\tMODEL\tURL")
 			fmt.Fprintln(w, "  --\t-----\t---")
-			for _, inst := range instances {
+			for _, inst := range running {
 				fmt.Fprintf(w, "  %d\t%s\thttp://localhost:%d/v1\n", inst.ID, inst.ModelName, inst.LocalPort)
 			}
 			return w.Flush()

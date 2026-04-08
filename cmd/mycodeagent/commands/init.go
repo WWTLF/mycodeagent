@@ -1,13 +1,14 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/WWTLF/mycodeagent/internal/domain/service"
+	"github.com/WWTLF/mycodeagent/internal/application"
 	"github.com/spf13/cobra"
 )
 
-func NewInitCmd(deploySvc *service.DeployService) *cobra.Command {
+func NewInitCmd(app *application.App) *cobra.Command {
 	var createOnly bool
 	var noVolume bool
 
@@ -17,7 +18,7 @@ func NewInitCmd(deploySvc *service.DeployService) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if createOnly {
-				result, err := deploySvc.DeployCreateOnly(args[0], noVolume)
+				result, err := app.DeployCreateOnly(context.Background(), args[0], noVolume)
 				if err != nil {
 					return err
 				}
@@ -45,7 +46,7 @@ func NewInitCmd(deploySvc *service.DeployService) *cobra.Command {
 				return nil
 			}
 
-			_, err := deploySvc.Deploy(args[0], noVolume)
+			_, err := app.Deploy(context.Background(), args[0], noVolume)
 			return err
 		},
 	}

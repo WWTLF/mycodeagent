@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
-	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
 	"github.com/spf13/cobra"
@@ -15,11 +14,11 @@ func NewBudgetCmd(app *application.App) *cobra.Command {
 		Use:   "budget",
 		Short: "Show consumption by instances",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			instances, err := app.Instances.FindAll()
+			summary, err := app.GetBudget(cmd.Context())
 			if err != nil {
 				return err
 			}
-			if len(instances) == 0 {
+			if len(summary.Lines) == 0 {
 				fmt.Println("No instances found.")
 				return nil
 			}
@@ -29,16 +28,10 @@ func NewBudgetCmd(app *application.App) *cobra.Command {
 			fmt.Fprintln(w, "--\t-----\t------\t----\t-----\t-------")
 
 			var grandTotal float64
-			for _, inst := range instances {
-				hours := time.Since(inst.CreatedAt).Hours()
-				if inst.Status == "stopped" {
-					// For stopped instances, use a rough estimate
-					hours = 0
-				}
-				cost := inst.HourlyRate * hours
-				grandTotal += cost
+			for _, line := range summary.Lines {
+				grandTotal += line.Cost
 				fmt.Fprintf(w, "%d\t%s\t%s\t%.3f\t%.1f\t%.2f\n",
-					inst.ID, inst.ModelName, inst.Status, inst.HourlyRate, hours, cost)
+					line.ID, line.ModelName, line.Status, line.HourlyRate, line.Hours, line.Cost)
 			}
 			w.Flush()
 			fmt.Printf("\nTotal estimated spend: $%.2f\n", grandTotal)

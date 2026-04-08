@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -26,7 +27,7 @@ func NewVolumeService(
 }
 
 // Create searches for the cheapest volume offer, rents it, and saves to DB.
-func (s *VolumeService) Create(sizeGB int) (*entity.Volume, error) {
+func (s *VolumeService) Create(ctx context.Context, sizeGB int) (*entity.Volume, error) {
 	if sizeGB <= 0 {
 		sizeGB = 50
 	}
@@ -50,7 +51,6 @@ func (s *VolumeService) Create(sizeGB int) (*entity.Volume, error) {
 	}
 	fmt.Printf("Volume created: %s\n", result.VolumeName)
 
-	// Extract volume ID from name (e.g. "V.34258398" → 34258398)
 	vastaiID := 0
 	if strings.HasPrefix(result.VolumeName, "V.") {
 		fmt.Sscanf(result.VolumeName[2:], "%d", &vastaiID)
@@ -70,11 +70,16 @@ func (s *VolumeService) Create(sizeGB int) (*entity.Volume, error) {
 		return nil, fmt.Errorf("save volume: %w", err)
 	}
 
+	fmt.Println("Waiting for volume to leave 'initialized' state...")
+	if err := s.vastai.WaitForVolumeReady(ctx, vastaiID); err != nil {
+		return nil, fmt.Errorf("wait for volume ready: %w", err)
+	}
+
 	return vol, nil
 }
 
 // List returns all volumes, cleaning up stale records when the API confirms they're gone.
-func (s *VolumeService) List() ([]*entity.Volume, error) {
+func (s *VolumeService) List(ctx context.Context) ([]*entity.Volume, error) {
 	localVols, err := s.volumes.FindAll()
 	if err != nil {
 		return nil, err
@@ -103,7 +108,7 @@ func (s *VolumeService) List() ([]*entity.Volume, error) {
 }
 
 // Delete removes a volume from vast.ai and local DB.
-func (s *VolumeService) Delete(id int64) error {
+func (s *VolumeService) Delete(ctx context.Context, id int64) error {
 	vols, err := s.volumes.FindAll()
 	if err != nil {
 		return err

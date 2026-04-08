@@ -7,20 +7,16 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/WWTLF/mycodeagent/internal/infrastructure/config"
-	"github.com/WWTLF/mycodeagent/internal/infrastructure/vastai"
+	"github.com/WWTLF/mycodeagent/internal/application"
 	"github.com/spf13/cobra"
 )
 
-func NewLoginCmd() *cobra.Command {
+func NewLoginCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "login",
 		Short: "Configure vast.ai API key and HuggingFace token",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				cfg = &config.Config{BasePort: 8000}
-			}
+			ctx := cmd.Context()
 
 			reader := bufio.NewReader(os.Stdin)
 
@@ -28,95 +24,75 @@ func NewLoginCmd() *cobra.Command {
 			fmt.Println("===================================================================")
 			fmt.Printf("Visit https://cloud.vast.ai/manage-keys/ to get your API token\n")
 			fmt.Println("===================================================================")
-			current := maskKey(cfg.VastaiAPIKey)
-			fmt.Printf("Vast.ai API key   %s: ", current)
-			apiKey, _ := reader.ReadString('\n')
-			apiKey = strings.TrimSpace(apiKey)
-			if apiKey != "" {
-				cfg.VastaiAPIKey = apiKey
-			}
+			fmt.Printf("Vast.ai API key   %s: ", maskKey(app.VastaiAPIKey()))
+			apiKeyInput, _ := reader.ReadString('\n')
+			apiKeyInput = strings.TrimSpace(apiKeyInput)
 
 			// HF token (optional for gated models like Llama 3, some Mistral variants)
 			fmt.Println("===================================================================")
 			fmt.Printf("Visit https://huggingface.co/settings/tokens to get a read token\n")
 			fmt.Println("===================================================================")
-			current = maskKey(cfg.HFToken)
-			fmt.Printf("HuggingFace token %s: ", current)
-			hfToken, _ := reader.ReadString('\n')
-			hfToken = strings.TrimSpace(hfToken)
-			if hfToken != "" {
-				cfg.HFToken = hfToken
+			fmt.Printf("HuggingFace token %s: ", maskKey(app.HFToken()))
+			hfTokenInput, _ := reader.ReadString('\n')
+			hfTokenInput = strings.TrimSpace(hfTokenInput)
+
+			// Pick the effective vast.ai key for verification: new one if
+			// supplied, otherwise the existing one. We need a non-empty key
+			// to do anything meaningful (verify, list SSH keys, etc.).
+			effectiveKey := apiKeyInput
+			if effectiveKey == "" {
+				effectiveKey = app.VastaiAPIKey()
 			}
 
-			// Verify vast.ai API key before saving
-			if cfg.VastaiAPIKey != "" {
-				fmt.Print("Verifying vast.ai API key... ")
-				client := vastai.NewClient(cfg.VastaiAPIKey)
-				verbose, _ := cmd.Flags().GetBool("verbose")
-				client.SetVerbose(verbose)
-				if err := client.VerifyAPIKey(); err != nil {
-					fmt.Println("FAILED")
-					return fmt.Errorf("vast.ai API key verification failed: %w", err)
-				}
-				fmt.Println("OK")
-			}
-
-			// Check SSH key
-			if cfg.VastaiAPIKey != "" {
-				client := vastai.NewClient(cfg.VastaiAPIKey)
-				verbose, _ := cmd.Flags().GetBool("verbose")
-				client.SetVerbose(verbose)
-
-				keys, err := client.ListSSHKeys()
-				if err == nil {
-					pubKey := findSSHPubKey()
-					if pubKey == "" {
-						fmt.Println("No SSH key found at ~/.ssh/id_*.pub")
-						fmt.Println("Generate one with: ssh-keygen -t ed25519")
-						fmt.Println("Then run 'mycodeagent login' again.")
-					} else {
-						// Check if local key is already uploaded
-						localKeyFields := strings.Fields(pubKey)
-						localKeyData := ""
-						if len(localKeyFields) >= 2 {
-							localKeyData = localKeyFields[1]
-						}
-						found := false
-						for _, k := range keys {
-							if pk, ok := k["public_key"].(string); ok {
-								if fields := strings.Fields(pk); len(fields) >= 2 && fields[1] == localKeyData {
-									found = true
-									break
-								}
-							}
-						}
-						if found {
-							fmt.Printf("SSH key: already uploaded (%d key(s) on vast.ai)\n", len(keys))
-						} else {
-							fmt.Println("===================================================================")
-							fmt.Printf("Local key not found on vast.ai (%d key(s) exist).\n", len(keys))
-							fmt.Printf("Found local key: %s...%s\n", pubKey[:20], pubKey[len(pubKey)-20:])
-							fmt.Print("Upload to vast.ai? [Y/n]: ")
-							answer, _ := reader.ReadString('\n')
-							answer = strings.TrimSpace(strings.ToLower(answer))
-							if answer == "" || answer == "y" || answer == "yes" {
-								if err := client.CreateSSHKey(pubKey); err != nil {
-									fmt.Printf("Failed to upload SSH key: %v\n", err)
-								} else {
-									fmt.Println("SSH key uploaded.")
-								}
-							}
-						}
+			// Local SSH pub key — only relevant when we have a key to act on.
+			pubKey := ""
+			autoUpload := ""
+			if effectiveKey != "" {
+				pubKey = findSSHPubKey()
+				if pubKey == "" {
+					fmt.Println("No SSH key found at ~/.ssh/id_*.pub")
+					fmt.Println("Generate one with: ssh-keygen -t ed25519")
+					fmt.Println("Then run 'mycodeagent login' again to upload it.")
+				} else {
+					// We don't know yet whether the key is already on the
+					// remote — Login will check. Pre-decide whether to upload
+					// if it isn't there. Default: yes (matches old prompt).
+					fmt.Printf("Found local SSH key: %s...%s\n", pubKey[:20], pubKey[len(pubKey)-20:])
+					fmt.Print("Upload to vast.ai if not already registered? [Y/n]: ")
+					answer, _ := reader.ReadString('\n')
+					answer = strings.TrimSpace(strings.ToLower(answer))
+					if answer == "" || answer == "y" || answer == "yes" {
+						autoUpload = pubKey
 					}
 				}
 			}
 
-			if err := config.Save(cfg); err != nil {
-				return fmt.Errorf("save config: %w", err)
+			fmt.Println()
+			fmt.Print("Saving... ")
+			result, err := app.Login(ctx, application.LoginInput{
+				VastaiKey:       apiKeyInput,
+				HFToken:         hfTokenInput,
+				UploadSSHPubKey: autoUpload,
+			})
+			if err != nil {
+				fmt.Println("FAILED")
+				return err
+			}
+			fmt.Println("OK")
+
+			if result.KeyVerified {
+				fmt.Println("Vast.ai API key: verified")
+			}
+			if autoUpload != "" {
+				if result.SSHKeyUploaded {
+					fmt.Println("SSH key: uploaded to vast.ai")
+				} else if pubKey != "" {
+					fmt.Printf("SSH key: already on vast.ai (%d key(s) on account)\n", result.SSHKeysOnRemote)
+				}
+			} else if result.SSHKeysOnRemote > 0 {
+				fmt.Printf("SSH key: %d key(s) on vast.ai account\n", result.SSHKeysOnRemote)
 			}
 
-			configPath, _ := config.ConfigPath()
-			fmt.Printf("Saved to %s\n", configPath)
 			fmt.Println("===================================================================")
 			return nil
 		},
