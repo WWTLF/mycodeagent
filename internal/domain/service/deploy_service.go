@@ -257,7 +257,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 		return nil, fmt.Errorf("save instance: %w", err)
 	}
 
-	fmt.Println("Waiting for vLLM to become healthy (model downloading, this may take a while)...")
+	fmt.Println("Waiting for model server to become healthy (model downloading, this may take a while)...")
 	healthCh := make(chan error, 1)
 	go func() {
 		healthCh <- s.ssh.WaitForVLLMHealth(ctx, localPort)

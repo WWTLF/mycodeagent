@@ -9,6 +9,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func boolMark(v bool) string {
+	if v {
+		return "+"
+	}
+	return "-"
+}
+
+func formatContext(ctx int) string {
+	if ctx <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%dK", ctx/1024)
+}
+
 func NewModelsCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "models",
@@ -31,20 +45,23 @@ func NewModelsCmd(app *application.App) *cobra.Command {
 				}
 			}
 
-			fmt.Fprintln(w, "ALIAS\tNAME\tGPUs\tENGINE\t$/HR\tHF REPO")
-			fmt.Fprintln(w, "-----\t----\t----\t------\t----\t-------")
+			fmt.Fprintln(w, "ALIAS\tNAME\tGPUs\tCTX\tR\tV\tT\t$/HR\tHF REPO")
+			fmt.Fprintln(w, "-----\t----\t----\t---\t-\t-\t-\t----\t-------")
 			for _, m := range models {
 				numGPUs := m.NumGPUs
 				if numGPUs <= 0 {
 					numGPUs = 1
 				}
 				gpuStr := fmt.Sprintf("%dx %dGB", numGPUs, m.VRAM)
-				engineStr := string(m.Engine)
+				ctxStr := formatContext(m.ContextLength)
+				rStr := boolMark(m.Reasoning)
+				vStr := boolMark(m.Vision)
+				tStr := boolMark(m.ToolCalling)
 				priceStr := "-"
 				if p, ok := prices[m.Name]; ok {
 					priceStr = fmt.Sprintf("$%.3f", p)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", m.Alias, m.Name, gpuStr, engineStr, priceStr, m.HFRepo)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.Alias, m.Name, gpuStr, ctxStr, rStr, vStr, tStr, priceStr, m.HFRepo)
 			}
 			return w.Flush()
 		},

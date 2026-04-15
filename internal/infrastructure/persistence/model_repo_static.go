@@ -10,107 +10,100 @@ import (
 
 var defaultModels = []*entity.Model{
 	{
-		// Native long-context Qwen3.5-35B-A3B MoE in AWQ. The MoE architecture
-		// (3B active params/token) keeps per-token KV small enough to fit 130k
-		// on a 2-GPU rental, and the model ships with 262k native context — no
-		// YaRN needed for our 130k target. ~25 GiB weights, so we ask for 32 GB
-		// per GPU to leave room for KV cache + CUDA graphs after the split.
-		Name:             "qwen3-5-35b-a3b-awq",
+		Name:             "qwen35-9b-gguf",
+		Alias:            "coder-mini",
+		HFRepo:           "lmstudio-community/Qwen3.5-9B-GGUF",
+		Category:         entity.CategoryCoding,
+		VRAM:             16,
+		NumGPUs:          1,
+		StartupTimeout:   10 * time.Minute,
+		ContextLength:    262144,
+		MaxContextLength: 262144,
+		Engine:           entity.EngineLMStudio,
+		GGUFFile:         "Qwen3.5-9B-Q4_K_M.gguf",
+		Reasoning:        true,
+		Vision:           true,
+		ToolCalling:      true,
+	},
+	{
+		Name:             "qwen35-35b-a3b-gguf",
 		Alias:            "coder",
-		HFRepo:           "QuantTrio/Qwen3.5-35B-A3B-AWQ",
+		HFRepo:           "lmstudio-community/Qwen3.5-35B-A3B-GGUF",
 		Category:         entity.CategoryCoding,
 		VRAM:             32,
-		NumGPUs:          2,
-		StartupTimeout:   25 * time.Minute,
-		ContextLength:    131072,
+		NumGPUs:          1,
+		StartupTimeout:   15 * time.Minute,
+		ContextLength:    262144,
 		MaxContextLength: 262144,
-		// Note: no --quantization / --dtype — vLLM auto-detects from the model
-		// config.json and upgrades AWQ to awq_marlin (including AWQMarlinMoEMethod
-		// for experts) on Ampere+ GPUs.
-		// Note: no --swap-space — removed from vLLM's v1 engine (v0.19.0). The
-		// QuantTrio model card example still lists it, but `vllm serve` now
-		// errors with "unrecognized arguments: --swap-space".
-		// Tool parser: qwen3_xml (not qwen3_coder). Both parsers in v0.19.0
-		// scan the same <tool_call>/<function=> XML tokens, but qwen3_xml is
-		// the one listed in the official vLLM tool_calling.md for the Qwen3-
-		// Coder family. qwen3_coder exists in the code but isn't documented.
-		VLLMArgs: []string{
-			"--enable-auto-tool-choice",
-			"--tool-call-parser", "qwen3_xml",
-			"--reasoning-parser", "qwen3",
-			"--enable-expert-parallel",
-			"--gpu-memory-utilization", "0.90",
-			"--trust-remote-code",
-			"--enable-prefix-caching",
-		},
+		Engine:           entity.EngineLMStudio,
+		GGUFFile:         "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+		Reasoning:        true,
+		Vision:           true,
+		ToolCalling:      true,
 	},
 	{
-		Name:             "qwen3-vl-32b-instruct-fp8",
-		Alias:            "coder_vl",
-		HFRepo:           "Qwen/Qwen3-VL-32B-Instruct-FP8",
+		Name:             "qwen35-27b-gguf",
+		Alias:            "coder-vision",
+		HFRepo:           "lmstudio-community/Qwen3.5-27B-GGUF",
 		Category:         entity.CategoryCoding,
 		VRAM:             24,
 		NumGPUs:          2,
 		StartupTimeout:   15 * time.Minute,
-		ContextLength:    32768,
-		MaxContextLength: 131072,
-		VLLMArgs: []string{
-			"--gpu-memory-utilization", "0.90",
-			"--trust-remote-code",
-		},
+		ContextLength:    262144,
+		MaxContextLength: 262144,
+		Engine:           entity.EngineLMStudio,
+		GGUFFile:         "Qwen3.5-27B-Q6_K.gguf",
+		Reasoning:        true,
+		Vision:           true,
+		ToolCalling:      true,
 	},
 	{
-		Name:             "qwen25-32b-instruct-awq",
+		Name:             "gemma4-31b-gguf",
 		Alias:            "writer",
-		HFRepo:           "Qwen/Qwen2.5-32B-Instruct-AWQ",
-		Category:         entity.CategoryFiction,
-		VRAM:             24,
-		NumGPUs:          2,
-		StartupTimeout:   15 * time.Minute,
-		ContextLength:    32768,
-		MaxContextLength: 131072,
-		// No --quantization: auto-detect from config.json upgrades AWQ to
-		// awq_marlin on Ampere+ GPUs (~1.5-2x faster than plain awq). Forcing
-		// "awq" here would BLOCK that upgrade.
-		VLLMArgs: []string{
-			"--dtype", "half",
-			"--gpu-memory-utilization", "0.95",
-			"--enable-prefix-caching",
-			"--trust-remote-code",
-		},
-	},
-	{
-		Name:             "dolphin-glm-24b-gguf",
-		Alias:            "rude",
-		HFRepo:           "mradermacher/Dolphin-Mistral-GLM-4.7-Flash-24B-Venice-Edition-Thinking-Uncensored-i1-GGUF",
-		Category:         entity.CategoryDolphin,
-		VRAM:             24,
-		NumGPUs:          2,
-		StartupTimeout:   15 * time.Minute,
-		ContextLength:    65536,
-		MaxContextLength: 131072,
-		Engine:           entity.EngineLMStudio,
-		GGUFFile:         "Dolphin-Mistral-GLM-4.7-Flash-24B-Venice-Edition-Thinking-Uncensored.i1-Q4_K_M.gguf",
-	},
-	{
-		// GGUF fallback for the Qwen3.5-35B-A3B MoE. Uses unsloth's Dynamic 2.0
-		// UD-Q4_K_XL quant rather than the lmstudio-community Q4_K_M: per-layer
-		// bit allocation calibrated on a dataset, so the router weights and
-		// sensitive attention projections get more bits at the same ~22 GB
-		// footprint. Measurably better quality than vanilla Q4_K_M for MoE.
-		// ContextLength matches the AWQ `coder` floor — Mamba hybrid layers
-		// keep per-token KV cheap enough to hold 130k on 2x 24 GB.
-		Name:             "qwen3-5-35b-a3b-gguf",
-		Alias:            "coder-2",
-		HFRepo:           "unsloth/Qwen3.5-35B-A3B-GGUF",
+		HFRepo:           "unsloth/gemma-4-31B-it-GGUF",
 		Category:         entity.CategoryCoding,
 		VRAM:             24,
-		NumGPUs:          2,
-		ContextLength:    131072,
-		MaxContextLength: 262144,
+		NumGPUs:          1,
 		StartupTimeout:   15 * time.Minute,
+		ContextLength:    262144,
+		MaxContextLength: 262144,
 		Engine:           entity.EngineLMStudio,
-		GGUFFile:         "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf",
+		GGUFFile:         "gemma-4-31B-it-Q4_K_M.gguf",
+		Reasoning:        true,
+		Vision:           false,
+		ToolCalling:      true,
+	},
+	{
+		Name:             "lumimaid-magnum-v4-12b-gguf",
+		Alias:            "rude",
+		HFRepo:           "bartowski/Lumimaid-Magnum-v4-12B-GGUF",
+		Category:         entity.CategoryCoding,
+		VRAM:             16,
+		NumGPUs:          1,
+		StartupTimeout:   10 * time.Minute,
+		ContextLength:    131072,
+		MaxContextLength: 131072,
+		Engine:           entity.EngineLMStudio,
+		GGUFFile:         "Lumimaid-Magnum-v4-12B-Q6_K.gguf",
+		Reasoning:        false,
+		Vision:           false,
+		ToolCalling:      false,
+	},
+	{
+		Name:             "qwen35-35b-a3b-abliterated-gguf",
+		Alias:            "rude-pro",
+		HFRepo:           "mradermacher/Huihui-Qwen3.5-35B-A3B-abliterated-i1-GGUF",
+		Category:         entity.CategoryCoding,
+		VRAM:             24,
+		NumGPUs:          1,
+		StartupTimeout:   15 * time.Minute,
+		ContextLength:    262144,
+		MaxContextLength: 262144,
+		Engine:           entity.EngineLMStudio,
+		GGUFFile:         "Huihui-Qwen3.5-35B-A3B-abliterated.i1-Q4_K_M.gguf",
+		Reasoning:        true,
+		Vision:           true,
+		ToolCalling:      true,
 	},
 }
 
