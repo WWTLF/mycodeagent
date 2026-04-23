@@ -34,6 +34,7 @@ func main() {
 	modelRepo := persistence.NewStaticModelRepository()
 	instanceRepo := persistence.NewSQLiteInstanceRepository(db)
 	volumeRepo := persistence.NewSQLiteVolumeRepository(db)
+	badHostRepo := persistence.NewSQLiteBadHostRepository(db)
 
 	vastaiAdapter := vastai.NewAdapter(cfg.VastaiAPIKey)
 	sshAdapter := ssh.NewAdapter()
@@ -41,21 +42,23 @@ func main() {
 	engines := map[entity.ModelEngine]service.EngineProvider{
 		entity.EngineVLLM:     engine.NewVLLMEngine(),
 		entity.EngineLMStudio: engine.NewLMStudioEngine(),
+		entity.EngineLlamaCpp: engine.NewLlamaCppEngine(),
 	}
 
 	deploySvc := service.NewDeployService(
-		modelRepo, instanceRepo, volumeRepo,
+		modelRepo, instanceRepo, volumeRepo, badHostRepo,
 		vastaiAdapter, sshAdapter, engines,
 		cfg.BasePort, cfg.HFToken,
 	)
 
 	volumeSvc := service.NewVolumeService(volumeRepo, vastaiAdapter)
 	modelSvc := service.NewModelService(modelRepo)
+	badHostSvc := service.NewBadHostService(badHostRepo)
 	probe := serverprobe.New()
 	instanceSvc := service.NewInstanceService(instanceRepo, vastaiAdapter, sshAdapter, probe, modelSvc, cfg.BasePort)
 	credentialStore := config.NewStore()
 
-	app := application.NewApp(deploySvc, volumeSvc, instanceSvc, modelSvc, credentialStore, cfg.VastaiAPIKey, cfg.HFToken)
+	app := application.NewApp(deploySvc, volumeSvc, instanceSvc, modelSvc, badHostSvc, credentialStore, cfg.VastaiAPIKey, cfg.HFToken)
 
 	rootCmd := &cobra.Command{
 		Use:           "mycodeagent",
@@ -83,6 +86,7 @@ func main() {
 		commands.NewConfigCmd(app),
 		commands.NewRestartCmd(app),
 		commands.NewVolumeCmd(app),
+		commands.NewHostsCmd(app),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

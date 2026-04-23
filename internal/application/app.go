@@ -33,6 +33,7 @@ type App struct {
 	VolumeSvc   *service.VolumeService
 	InstanceSvc *service.InstanceService
 	ModelSvc    *service.ModelService
+	BadHostSvc  *service.BadHostService
 	credentials service.CredentialStore
 
 	// In-memory copy of the credentials loaded at startup. Updated by Login
@@ -46,6 +47,7 @@ func NewApp(
 	volumeSvc *service.VolumeService,
 	instanceSvc *service.InstanceService,
 	modelSvc *service.ModelService,
+	badHostSvc *service.BadHostService,
 	credentials service.CredentialStore,
 	vastaiKey string,
 	hfToken string,
@@ -55,6 +57,7 @@ func NewApp(
 		VolumeSvc:   volumeSvc,
 		InstanceSvc: instanceSvc,
 		ModelSvc:    modelSvc,
+		BadHostSvc:  badHostSvc,
 		credentials: credentials,
 		vastaiKey:   vastaiKey,
 		hfToken:     hfToken,
@@ -108,6 +111,10 @@ func (app *App) ListInstances(ctx context.Context) ([]*entity.Instance, error) {
 
 func (app *App) FindInstanceByVastaiID(ctx context.Context, vastaiID int64) (*entity.Instance, error) {
 	return app.InstanceSvc.FindByVastaiID(ctx, vastaiID)
+}
+
+func (app *App) FindInstanceByID(ctx context.Context, id int64) (*entity.Instance, error) {
+	return app.InstanceSvc.FindInstanceByID(ctx, id)
 }
 
 func (app *App) SaveInstance(ctx context.Context, inst *entity.Instance) error {
@@ -186,6 +193,22 @@ func (app *App) VolumeList(ctx context.Context) ([]*entity.Volume, error) {
 
 func (app *App) VolumeDelete(ctx context.Context, id int64) error {
 	return app.VolumeSvc.Delete(ctx, id)
+}
+
+// ============================================================================
+// Bad host management
+// ============================================================================
+
+func (app *App) ListBadHosts() ([]*entity.BadHost, error) {
+	return app.BadHostSvc.List()
+}
+
+func (app *App) RemoveBadHost(machineID int) error {
+	return app.BadHostSvc.Remove(machineID)
+}
+
+func (app *App) ClearBadHosts() error {
+	return app.BadHostSvc.Clear()
 }
 
 // ============================================================================

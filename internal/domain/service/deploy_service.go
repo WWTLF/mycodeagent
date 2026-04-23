@@ -96,6 +96,7 @@ type DeployService struct {
 	models    repository.ModelRepository
 	instances repository.InstanceRepository
 	volumes   repository.VolumeRepository
+	badHosts  repository.BadHostRepository
 	vastai    VastaiProvider
 	ssh       SSHTunnelProvider
 	engines   map[entity.ModelEngine]EngineProvider
@@ -107,6 +108,7 @@ func NewDeployService(
 	models repository.ModelRepository,
 	instances repository.InstanceRepository,
 	volumes repository.VolumeRepository,
+	badHosts repository.BadHostRepository,
 	vastai VastaiProvider,
 	ssh SSHTunnelProvider,
 	engines map[entity.ModelEngine]EngineProvider,
@@ -117,12 +119,55 @@ func NewDeployService(
 		models:    models,
 		instances: instances,
 		volumes:   volumes,
+		badHosts:  badHosts,
 		vastai:    vastai,
 		ssh:       ssh,
 		engines:   engines,
 		basePort:  basePort,
 		hfToken:   hfToken,
 	}
+}
+
+// markHostBad records a machine_id as bad so future SearchOffers skip it.
+// Tolerant of a nil repo or a DB error — the deploy already failed, we just
+// want to record what we can without masking the original error.
+func (s *DeployService) markHostBad(machineID int, reason string) {
+	if s.badHosts == nil || machineID == 0 {
+		return
+	}
+	if err := s.badHosts.Add(machineID, reason); err != nil {
+		fmt.Printf("warn: failed to record bad host %d: %v\n", machineID, err)
+		return
+	}
+	fmt.Printf("Recorded machine %d as bad host (%s)\n", machineID, reason)
+}
+
+// filterBadHosts drops offers whose MachineID is marked bad. Returns the full
+// list unchanged if the bad-host lookup fails — a flaky local DB must not block
+// the deploy. Silently returns all offers when the bad set is empty.
+func (s *DeployService) filterBadHosts(offers []OfferResult) []OfferResult {
+	if s.badHosts == nil || len(offers) == 0 {
+		return offers
+	}
+	bad, err := s.badHosts.List()
+	if err != nil || len(bad) == 0 {
+		return offers
+	}
+	skip := make(map[int]bool, len(bad))
+	for _, h := range bad {
+		skip[h.MachineID] = true
+	}
+	out := make([]OfferResult, 0, len(offers))
+	for _, o := range offers {
+		if skip[o.MachineID] {
+			continue
+		}
+		out = append(out, o)
+	}
+	if dropped := len(offers) - len(out); dropped > 0 {
+		fmt.Printf("Skipping %d offer(s) on known-bad hosts\n", dropped)
+	}
+	return out
 }
 
 // engineFor returns the EngineProvider for the given model, defaulting to vLLM.
@@ -192,8 +237,9 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
+	offers = s.filterBadHosts(offers)
 	if len(offers) == 0 {
-		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM", numGPUs, model.VRAM)
+		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM (after filtering bad hosts)", numGPUs, model.VRAM)
 	}
 	offer := offers[0] // cheapest (already sorted)
 	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
@@ -221,12 +267,14 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 	fmt.Println("Waiting for instance to start...")
 	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID, volumeID)
 	if err != nil {
+		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for instance: %v", err))
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
 	fmt.Printf("Instance running: SSH at %s:%d\n", sshHost, sshPort)
 
 	fmt.Println("Waiting for SSH...")
 	if err := s.ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
+		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for SSH: %v", err))
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
 
@@ -266,9 +314,11 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 	select {
 	case err := <-healthCh:
 		if err != nil {
+			s.markHostBad(offer.MachineID, fmt.Sprintf("health check: %v", err))
 			return nil, fmt.Errorf("vLLM health check: %w", err)
 		}
 	case <-ctx.Done():
+		s.markHostBad(offer.MachineID, fmt.Sprintf("startup timed out after %s", timeout))
 		return nil, fmt.Errorf("startup timed out after %s (tunnel still running at localhost:%d)", timeout, localPort)
 	}
 
@@ -306,8 +356,9 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
+	offers = s.filterBadHosts(offers)
 	if len(offers) == 0 {
-		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM", numGPUs, model.VRAM)
+		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM (after filtering bad hosts)", numGPUs, model.VRAM)
 	}
 	offer := offers[0]
 	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
@@ -331,6 +382,7 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 	fmt.Println("Waiting for instance to start...")
 	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID, volumeID)
 	if err != nil {
+		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for instance: %v", err))
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
 

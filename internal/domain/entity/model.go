@@ -13,6 +13,7 @@ type ModelEngine string
 const (
 	EngineVLLM     ModelEngine = "vllm"
 	EngineLMStudio ModelEngine = "lmstudio"
+	EngineLlamaCpp ModelEngine = "llamacpp"
 )
 
 type Model struct {
@@ -27,7 +28,8 @@ type Model struct {
 	ContextLength    int           // baseline context length sized for VRAM (0 = engine default)
 	MaxContextLength int           // architectural ceiling; DeployService scales ContextLength up toward this when the offer has more VRAM per GPU than VRAM. 0 = no scaling.
 	VLLMArgs         []string      // vLLM-specific serve arguments (must NOT contain --tensor-parallel-size or --max-model-len — those are injected from runtime values)
-	GGUFFile         string        // LM Studio-specific: GGUF filename to download
+	LlamaCppArgs     []string      // llama.cpp-specific llama-server arguments (must NOT contain -c/--ctx-size, -ngl, --host, --port, -m/--model, --split-mode, -ts — those are injected from runtime values)
+	GGUFFile         string        // GGUF filename to download (used by LM Studio and llama.cpp engines)
 	Reasoning        bool          // model supports thinking/reasoning
 	Vision           bool          // model supports image inputs
 	ToolCalling      bool          // model supports tool/function calling

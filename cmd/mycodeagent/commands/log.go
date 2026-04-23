@@ -23,7 +23,7 @@ func NewLogCmd(app *application.App) *cobra.Command {
 				return fmt.Errorf("invalid instance ID: %s", args[0])
 			}
 
-			inst, err := app.FindInstanceByVastaiID(ctx, id)
+			inst, err := app.FindInstanceByID(ctx, id)
 			if err != nil {
 				return err
 			}

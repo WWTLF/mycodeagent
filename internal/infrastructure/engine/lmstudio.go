@@ -45,7 +45,16 @@ func (e *LMStudioEngine) BuildOnstart(model *entity.Model, numGPUs, contextLengt
 	fmt.Fprintf(&b, "  aria2c -x 16 -s 16 -k 1M --continue=true --max-tries=5 --retry-wait=5 --file-allocation=none --console-log-level=warn --summary-interval=10 -d '%s' -o '%s' '%s'\n",
 		modelDir, model.GGUFFile, downloadURL)
 	b.WriteString("fi\n")
-	// lms stores models with lowercase short names; load the first available LLM.
+	// After aria2 places the file, `lms load` won't find it by path or HFRepo
+	// name — it needs the short name LM Studio assigns during indexing. Run a
+	// quick `lms get` so LM Studio registers the already-downloaded file (it
+	// detects the existing GGUF and skips the actual download).
+	quant := extractQuant(model.GGUFFile)
+	if quant != "" {
+		fmt.Fprintf(&b, "lms get 'https://huggingface.co/%s@%s' --yes\n", model.HFRepo, quant)
+	} else {
+		fmt.Fprintf(&b, "lms get 'https://huggingface.co/%s' --yes\n", model.HFRepo)
+	}
 	// contextLength is the runtime value computed by DeployService (scaled for the offer);
 	// fall back to the model's baseline if the caller didn't pass one.
 	ctx := contextLength
