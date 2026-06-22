@@ -29,10 +29,6 @@ func (e *VLLMEngine) BuildRawCommand(model *entity.Model, numGPUs, contextLength
 	return e.buildServeCommand(model, numGPUs, contextLength)
 }
 
-func (e *VLLMEngine) VolumeMountPath() string {
-	return "/root/.cache/huggingface"
-}
-
 func (e *VLLMEngine) RestartCommands(model *entity.Model) (killCmd string, startCmd string) {
 	// vLLM v1 spawns subprocesses (EngineCore, Worker_TP*) whose argv does NOT contain
 	// "vllm serve", so a single pkill on that pattern leaves orphans holding GPU memory

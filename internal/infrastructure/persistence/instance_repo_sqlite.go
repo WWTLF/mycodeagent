@@ -8,6 +8,11 @@ import (
 	"github.com/WWTLF/mycodeagent/internal/domain/repository"
 )
 
+// instanceColumns is the explicit projection used by every read. Listing columns
+// (instead of SELECT *) keeps the code working on older DBs that still carry the
+// now-removed volume_id / volume_name columns.
+const instanceColumns = "id, vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, created_at, num_gpus"
+
 type SQLiteInstanceRepository struct {
 	db *sql.DB
 }
@@ -20,10 +25,10 @@ func NewSQLiteInstanceRepository(db *sql.DB) *SQLiteInstanceRepository {
 
 func (r *SQLiteInstanceRepository) Save(inst *entity.Instance) error {
 	result, err := r.db.Exec(
-		`INSERT INTO instances (vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, volume_id, num_gpus, volume_name)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO instances (vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, num_gpus)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inst.VastaiID, inst.ModelName, inst.Status, inst.LocalPort,
-		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.VolumeID, inst.NumGPUs, inst.VolumeName,
+		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs,
 	)
 	if err != nil {
 		return err
@@ -37,27 +42,27 @@ func (r *SQLiteInstanceRepository) Save(inst *entity.Instance) error {
 }
 
 func (r *SQLiteInstanceRepository) FindByID(id int64) (*entity.Instance, error) {
-	return r.scanOne("SELECT * FROM instances WHERE id = ?", id)
+	return r.scanOne("SELECT "+instanceColumns+" FROM instances WHERE id = ?", id)
 }
 
 func (r *SQLiteInstanceRepository) FindByVastaiID(vastaiID int64) (*entity.Instance, error) {
-	return r.scanOne("SELECT * FROM instances WHERE vastai_id = ?", vastaiID)
+	return r.scanOne("SELECT "+instanceColumns+" FROM instances WHERE vastai_id = ?", vastaiID)
 }
 
 func (r *SQLiteInstanceRepository) FindAll() ([]*entity.Instance, error) {
-	return r.scanMany("SELECT * FROM instances ORDER BY created_at DESC")
+	return r.scanMany("SELECT " + instanceColumns + " FROM instances ORDER BY created_at DESC")
 }
 
 func (r *SQLiteInstanceRepository) FindRunning() ([]*entity.Instance, error) {
-	return r.scanMany("SELECT * FROM instances WHERE status LIKE 'starting%' OR status LIKE 'running%' ORDER BY created_at DESC")
+	return r.scanMany("SELECT " + instanceColumns + " FROM instances WHERE status LIKE 'starting%' OR status LIKE 'running%' ORDER BY created_at DESC")
 }
 
 func (r *SQLiteInstanceRepository) Update(inst *entity.Instance) error {
 	_, err := r.db.Exec(
 		`UPDATE instances SET vastai_id=?, model_name=?, status=?, local_port=?,
-		 ssh_host=?, ssh_port=?, tunnel_pid=?, hourly_rate=?, volume_id=?, num_gpus=?, volume_name=? WHERE id=?`,
+		 ssh_host=?, ssh_port=?, tunnel_pid=?, hourly_rate=?, num_gpus=? WHERE id=?`,
 		inst.VastaiID, inst.ModelName, inst.Status, inst.LocalPort,
-		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.VolumeID, inst.NumGPUs, inst.VolumeName, inst.ID,
+		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs, inst.ID,
 	)
 	return err
 }
@@ -85,16 +90,11 @@ func (r *SQLiteInstanceRepository) scanMany(query string, args ...any) ([]*entit
 
 	var result []*entity.Instance
 	for rows.Next() {
-		var inst entity.Instance
-		err := rows.Scan(
-			&inst.ID, &inst.VastaiID, &inst.ModelName, &inst.Status,
-			&inst.LocalPort, &inst.SSHHost, &inst.SSHPort, &inst.TunnelPID,
-			&inst.HourlyRate, &inst.CreatedAt, &inst.VolumeID, &inst.NumGPUs, &inst.VolumeName,
-		)
+		inst, err := scanInstance(rows)
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, &inst)
+		result = append(result, inst)
 	}
 	return result, rows.Err()
 }
@@ -108,7 +108,7 @@ func scanInstance(row scannable) (*entity.Instance, error) {
 	err := row.Scan(
 		&inst.ID, &inst.VastaiID, &inst.ModelName, &inst.Status,
 		&inst.LocalPort, &inst.SSHHost, &inst.SSHPort, &inst.TunnelPID,
-		&inst.HourlyRate, &inst.CreatedAt, &inst.VolumeID, &inst.NumGPUs, &inst.VolumeName,
+		&inst.HourlyRate, &inst.CreatedAt, &inst.NumGPUs,
 	)
 	return &inst, err
 }

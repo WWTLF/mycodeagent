@@ -32,50 +32,38 @@ func (c *Client) SetVerbose(v bool) {
 }
 
 type Offer struct {
-	ID             int     `json:"id"`
-	GPUName        string  `json:"gpu_name"`
-	NumGPUs        int     `json:"num_gpus"`
-	GPUMemory      float64 `json:"gpu_ram"`
-	DPHTotal       float64 `json:"dph_total"` // dollars per hour
-	Reliability    float64 `json:"reliability"`
-	MachineID      int     `json:"machine_id"`
-	AvailVolAskID  *int    `json:"avail_vol_ask_id"`
-	AvailVolSize   float64 `json:"avail_vol_size"`
-	Verification   string  `json:"verification"`
+	ID           int     `json:"id"`
+	GPUName      string  `json:"gpu_name"`
+	NumGPUs      int     `json:"num_gpus"`
+	GPUMemory    float64 `json:"gpu_ram"`
+	DPHTotal     float64 `json:"dph_total"` // dollars per hour
+	Reliability  float64 `json:"reliability"`
+	MachineID    int     `json:"machine_id"`
+	Verification string  `json:"verification"`
 }
 
 type InstanceInfo struct {
-	ID             int     `json:"id"`
-	ActualStatus   string  `json:"actual_status"`
-	CurState       string  `json:"cur_state"`
-	IntendedStatus string  `json:"intended_status"`
-	StatusMsg      string  `json:"status_msg"`
-	PublicIPAddr   string  `json:"public_ipaddr"`
-	SSHHost        string  `json:"ssh_host"`
-	SSHPort        int     `json:"ssh_port"`
-	DPHTotal       float64 `json:"dph_total"`
-	Verification   string  `json:"verification"`
-	MachineID      int     `json:"machine_id"`
-	Label          string  `json:"label"`
-	ImageUUID      string  `json:"image_uuid"`
-	Onstart        string      `json:"onstart"`
-	ExtraEnv       [][]string  `json:"extra_env"`
+	ID             int        `json:"id"`
+	ActualStatus   string     `json:"actual_status"`
+	CurState       string     `json:"cur_state"`
+	IntendedStatus string     `json:"intended_status"`
+	StatusMsg      string     `json:"status_msg"`
+	PublicIPAddr   string     `json:"public_ipaddr"`
+	SSHHost        string     `json:"ssh_host"`
+	SSHPort        int        `json:"ssh_port"`
+	DPHTotal       float64    `json:"dph_total"`
+	Verification   string     `json:"verification"`
+	MachineID      int        `json:"machine_id"`
+	Label          string     `json:"label"`
+	ImageUUID      string     `json:"image_uuid"`
+	Onstart        string     `json:"onstart"`
+	ExtraEnv       [][]string `json:"extra_env"`
 	// Ports is a nested map: {"22/tcp": [{"HostPort": "12345"}]}
 	Ports map[string][]PortMapping `json:"ports"`
 }
 
 type PortMapping struct {
 	HostPort string `json:"HostPort"`
-}
-
-func (i *InstanceInfo) HasVolume(volumeID int) bool {
-	needle := fmt.Sprintf("V.%d:", volumeID)
-	for _, env := range i.ExtraEnv {
-		if len(env) > 0 && strings.Contains(env[0], needle) {
-			return true
-		}
-	}
-	return false
 }
 
 func (i *InstanceInfo) GetSSHPort() int {
@@ -99,30 +87,6 @@ type Invoice struct {
 	Amount      string `json:"amount"`
 	Quantity    string `json:"quantity"`
 	Rate        string `json:"rate"`
-}
-
-type VolumeOffer struct {
-	ID        int     `json:"id"`
-	MachineID int     `json:"machine_id"`
-	Location  string  `json:"geolocation"`
-	DPHTotal  float64 `json:"dph_total"`
-}
-
-type VolumeInfo struct {
-	ID        int     `json:"id"`
-	Label     string  `json:"label"`
-	MachineID int     `json:"machine_id"`
-	DiskSpace float64 `json:"disk_space"`
-	Status    string  `json:"status"`
-	Location  string  `json:"geolocation"`
-}
-
-type RentVolumeResponse struct {
-	Success    bool   `json:"success"`
-	VolumeName string `json:"volume_name"`
-	// Raw holds every field vast.ai returned, so we can recover unknown fields
-	// (e.g. the actual numeric volume ID) without losing data to the typed decode.
-	Raw map[string]any `json:"-"`
 }
 
 // ListSSHKeys returns SSH keys associated with the account.
@@ -157,7 +121,9 @@ func (c *Client) VerifyAPIKey() error {
 }
 
 // SearchOffers finds GPU offers matching the VRAM and GPU count requirements.
-func (c *Client) SearchOffers(minGPURAM int, numGPUs int) ([]Offer, error) {
+// minDiskGB is the minimum *host* free disk to require (container disk + image
+// + scratch); pass <= 0 to fall back to a safe default.
+func (c *Client) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]Offer, error) {
 	// gpu_ram is in MB on vast.ai API; compute_cap >= 800 required for AWQ/GPTQ kernels.
 	// Use 90% threshold to catch GPUs that report slightly less (e.g. RTX 3090 reports ~23GB).
 	// cuda_vers >= 12.8 filters by the CUDA *toolkit* installed on the host, but that's
@@ -168,7 +134,7 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int) ([]Offer, error) {
 	// consumer GPUs (RTX 30xx/40xx) don't implement CUDA forward compat — only datacenter
 	// cards do. Filtering on cuda_max_good >= 12.8 weeds out under-driver hosts before
 	// they ever boot a container. We keep cuda_vers as a belt-and-suspenders check.
-	// disk_space >= 60 ensures the host has at least 60 GB free for our 40 GB container
+	// disk_space >= minDiskGB ensures the host has enough free disk for our container
 	// rootfs request plus image layers + scratch (the vllm-openai image alone is ~15 GB).
 	// Without this, vast.ai can land us on a near-full host and container creation fails
 	// with `docker_build() error writing dockerfile`, which is not recoverable.
@@ -176,10 +142,13 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int) ([]Offer, error) {
 	if numGPUs <= 0 {
 		numGPUs = 1
 	}
+	if minDiskGB <= 0 {
+		minDiskGB = 60
+	}
 	// verified==true filters out unverified hosts whose vast.ai worker is often broken
 	// (those emit `docker_build() error writing dockerfile` at container creation).
 	// reliability2 >= 0.95 further weeds out hosts with flaky recent uptime history.
-	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"cuda_vers\":{\"gte\":12.8},\"cuda_max_good\":{\"gte\":12.8},\"disk_space\":{\"gte\":60},\"verified\":{\"eq\":true},\"reliability2\":{\"gte\":0.95},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs)
+	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"cuda_vers\":{\"gte\":12.8},\"cuda_max_good\":{\"gte\":12.8},\"disk_space\":{\"gte\":%d},\"verified\":{\"eq\":true},\"reliability2\":{\"gte\":0.95},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs, minDiskGB)
 
 	var offers struct {
 		Offers []Offer `json:"offers"`
@@ -190,9 +159,9 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int) ([]Offer, error) {
 	return offers.Offers, nil
 }
 
-// CreateInstance accepts an offer and creates a new instance.
-// If volumeID > 0, attaches the volume at mountPath.
-func (c *Client) CreateInstance(offerID int, image string, envVars map[string]string, onstart string, volumeID int, mountPath string) (*CreateInstanceResponse, error) {
+// CreateInstance accepts an offer and creates a new instance with the given
+// container disk size (GB).
+func (c *Client) CreateInstance(offerID int, image string, envVars map[string]string, onstart string, diskGB int) (*CreateInstanceResponse, error) {
 	url := fmt.Sprintf("%s/api/v0/asks/%d/", baseURL, offerID)
 
 	env := make(map[string]string)
@@ -200,20 +169,17 @@ func (c *Client) CreateInstance(offerID int, image string, envVars map[string]st
 		env[k] = v
 	}
 
+	if diskGB <= 0 {
+		diskGB = 40
+	}
+
 	body := map[string]any{
 		"client_id": "me",
 		"image":     image,
 		"runtype":   "ssh",
-		"disk":      40,
+		"disk":      diskGB,
 		"onstart":   onstart,
 		"env":       env,
-	}
-
-	if volumeID > 0 && mountPath != "" {
-		body["volume_info"] = map[string]any{
-			"volume_id":  volumeID,
-			"mount_path": mountPath,
-		}
 	}
 
 	var resp CreateInstanceResponse
@@ -289,63 +255,6 @@ func (c *Client) GetInstanceLogs(instanceID int, tail string) (string, error) {
 	return "", fmt.Errorf("no log URL in response: %s", string(data))
 }
 
-// SearchVolumeOffers finds available volume offers.
-func (c *Client) SearchVolumeOffers(sizeGB int) ([]VolumeOffer, error) {
-	url := fmt.Sprintf("%s/api/v0/volumes/search/?limit=64", baseURL)
-	body := map[string]any{}
-	var result struct {
-		Offers []VolumeOffer `json:"offers"`
-	}
-	if err := c.doPost(url, body, &result); err != nil {
-		return nil, fmt.Errorf("search volume offers: %w", err)
-	}
-	return result.Offers, nil
-}
-
-// RentVolume rents a volume on the given offer with the specified size.
-func (c *Client) RentVolume(offerID int, sizeGB int) (*RentVolumeResponse, error) {
-	url := fmt.Sprintf("%s/api/v0/volumes/", baseURL)
-	body := map[string]any{
-		"id":   offerID,
-		"size": sizeGB,
-	}
-	// Decode into a map first so we don't drop unknown fields, then copy into the typed struct.
-	raw := map[string]any{}
-	if err := c.doPut(url, body, &raw); err != nil {
-		return nil, fmt.Errorf("rent volume: %w", err)
-	}
-	resp := &RentVolumeResponse{Raw: raw}
-	if v, ok := raw["success"].(bool); ok {
-		resp.Success = v
-	}
-	if v, ok := raw["volume_name"].(string); ok {
-		resp.VolumeName = v
-	}
-	return resp, nil
-}
-
-// ListVolumes returns all user volumes.
-func (c *Client) ListVolumes() ([]VolumeInfo, error) {
-	url := fmt.Sprintf("%s/api/v0/volumes/", baseURL)
-	var wrapper struct {
-		Volumes []VolumeInfo `json:"volumes"`
-	}
-	if err := c.doGet(url, &wrapper); err != nil {
-		return nil, fmt.Errorf("list volumes: %w", err)
-	}
-	return wrapper.Volumes, nil
-}
-
-// DeleteVolume deletes a volume by ID.
-func (c *Client) DeleteVolume(volumeID int) error {
-	url := fmt.Sprintf("%s/api/v0/volumes/", baseURL)
-	body := map[string]any{"id": volumeID}
-	if err := c.doDeleteWithBody(url, body); err != nil {
-		return fmt.Errorf("delete volume %d: %w", volumeID, err)
-	}
-	return nil
-}
-
 // GetInvoices returns billing invoices.
 func (c *Client) GetInvoices() ([]Invoice, error) {
 	url := fmt.Sprintf("%s/api/v0/invoices", baseURL)
@@ -396,19 +305,6 @@ func (c *Client) doDelete(url string) error {
 	if err != nil {
 		return err
 	}
-	return c.doRequest(req, nil)
-}
-
-func (c *Client) doDeleteWithBody(url string, body any) error {
-	jsonBody, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest("DELETE", url, strings.NewReader(string(jsonBody)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
 	return c.doRequest(req, nil)
 }
 

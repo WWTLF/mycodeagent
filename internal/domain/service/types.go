@@ -14,5 +14,4 @@ type RemoteInstance struct {
 	SSHPort      int
 	HourlyRate   float64
 	Onstart      string
-	VolumeName   string // extracted from ExtraEnv -v V.123:/mount entries; "-" or "" if none
 }

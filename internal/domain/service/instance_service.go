@@ -267,7 +267,7 @@ func (s *InstanceService) SearchOffers(ctx context.Context, model *entity.Model)
 	if numGPUs <= 0 {
 		numGPUs = 1
 	}
-	return s.vastai.SearchOffers(model.VRAM, numGPUs)
+	return s.vastai.SearchOffers(model.VRAM, numGPUs, diskFor(model)+diskHeadroomGB)
 }
 
 // ============================================================================
@@ -342,9 +342,6 @@ func (s *InstanceService) Sync(ctx context.Context) ([]*entity.Instance, error) 
 				local.SSHPort = ri.SSHPort
 			}
 			local.HourlyRate = ri.HourlyRate
-			if ri.VolumeName != "" {
-				local.VolumeName = ri.VolumeName
-			}
 			if err := s.instances.Update(local); err != nil {
 				fmt.Printf("update instance %d: %v\n", local.ID, err)
 			}
@@ -358,7 +355,6 @@ func (s *InstanceService) Sync(ctx context.Context) ([]*entity.Instance, error) 
 			SSHHost:    ri.SSHHost,
 			SSHPort:    ri.SSHPort,
 			HourlyRate: ri.HourlyRate,
-			VolumeName: ri.VolumeName,
 		}
 		if err := s.instances.Save(inst); err != nil {
 			fmt.Printf("save instance %d: %v\n", vastID, err)

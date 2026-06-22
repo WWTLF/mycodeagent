@@ -30,7 +30,6 @@ import (
 
 type App struct {
 	DeploySvc   *service.DeployService
-	VolumeSvc   *service.VolumeService
 	InstanceSvc *service.InstanceService
 	ModelSvc    *service.ModelService
 	BadHostSvc  *service.BadHostService
@@ -44,7 +43,6 @@ type App struct {
 
 func NewApp(
 	deploySvc *service.DeployService,
-	volumeSvc *service.VolumeService,
 	instanceSvc *service.InstanceService,
 	modelSvc *service.ModelService,
 	badHostSvc *service.BadHostService,
@@ -54,7 +52,6 @@ func NewApp(
 ) *App {
 	return &App{
 		DeploySvc:   deploySvc,
-		VolumeSvc:   volumeSvc,
 		InstanceSvc: instanceSvc,
 		ModelSvc:    modelSvc,
 		BadHostSvc:  badHostSvc,
@@ -78,12 +75,12 @@ func (app *App) HFToken() string { return app.hfToken }
 // Deploy lifecycle
 // ============================================================================
 
-func (app *App) Deploy(ctx context.Context, modelName string, noVolume bool) (*entity.Instance, error) {
-	return app.DeploySvc.Deploy(ctx, modelName, noVolume)
+func (app *App) Deploy(ctx context.Context, modelName string) (*entity.Instance, error) {
+	return app.DeploySvc.Deploy(ctx, modelName)
 }
 
-func (app *App) DeployCreateOnly(ctx context.Context, modelName string, noVolume bool) (*service.CreateOnlyResult, error) {
-	return app.DeploySvc.DeployCreateOnly(ctx, modelName, noVolume)
+func (app *App) DeployCreateOnly(ctx context.Context, modelName string) (*service.CreateOnlyResult, error) {
+	return app.DeploySvc.DeployCreateOnly(ctx, modelName)
 }
 
 func (app *App) Stop(ctx context.Context, id int64) error {
@@ -177,22 +174,6 @@ func (app *App) ListModels() ([]*entity.Model, error) {
 
 func (app *App) FindModelByName(name string) (*entity.Model, error) {
 	return app.ModelSvc.FindByName(name)
-}
-
-// ============================================================================
-// Volume lifecycle
-// ============================================================================
-
-func (app *App) VolumeCreate(ctx context.Context, sizeGB int) (*entity.Volume, error) {
-	return app.VolumeSvc.Create(ctx, sizeGB)
-}
-
-func (app *App) VolumeList(ctx context.Context) ([]*entity.Volume, error) {
-	return app.VolumeSvc.List(ctx)
-}
-
-func (app *App) VolumeDelete(ctx context.Context, id int64) error {
-	return app.VolumeSvc.Delete(ctx, id)
 }
 
 // ============================================================================

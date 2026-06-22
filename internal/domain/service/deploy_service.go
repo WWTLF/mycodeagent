@@ -13,18 +13,11 @@ import (
 // VastaiProvider abstracts vast.ai API operations for the domain layer.
 type VastaiProvider interface {
 	// Offer / instance lifecycle (used by DeployService)
-	SearchOffers(minGPURAM int, numGPUs int) ([]OfferResult, error)
-	CreateInstance(offerID int, image string, envVars map[string]string, onstart string, volumeID int, mountPath string) (instanceID int, err error)
-	WaitForInstance(ctx context.Context, instanceID int, volumeID int) (sshHost string, sshPort int, hourlyRate float64, err error)
+	SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]OfferResult, error)
+	CreateInstance(offerID int, image string, envVars map[string]string, onstart string, diskGB int) (instanceID int, err error)
+	WaitForInstance(ctx context.Context, instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error)
 	StopInstance(instanceID int) error
 	DestroyInstance(instanceID int) error
-
-	// Volume lifecycle (used by DeployService and VolumeService)
-	SearchVolumeOffers(sizeGB int) ([]VolumeOfferResult, error)
-	RentVolume(offerID int, sizeGB int) (*VolumeResult, error)
-	WaitForVolumeReady(ctx context.Context, volumeID int) error
-	ListVolumes() ([]VolumeResult, error)
-	DeleteVolume(volumeID int) error
 
 	// Read-side instance access (used by InstanceService for ps/tunnel/sync flows).
 	// Returns service-package types so domain code never imports infrastructure/vastai.
@@ -41,21 +34,9 @@ type VastaiProvider interface {
 	CreateSSHKey(ctx context.Context, apiKey string, pubKey string) error
 }
 
-type VolumeOfferResult struct {
-	ID        int
-	MachineID int
-	Location  string
-	DPHTotal  float64
-}
-
-type VolumeResult struct {
-	ID         int
-	VolumeName string
-	SizeGB     int
-	MachineID  int
-}
-
-// EngineProvider abstracts engine-specific deployment details (vLLM, LM Studio, etc.)
+// EngineProvider abstracts engine-specific deployment details. There is one
+// implementation (vLLM); the interface is kept so the domain layer depends on
+// an abstraction rather than the concrete infrastructure type.
 type EngineProvider interface {
 	// DockerImage returns the Docker image to use on vast.ai
 	DockerImage() string
@@ -65,8 +46,6 @@ type EngineProvider interface {
 	BuildOnstart(model *entity.Model, numGPUs, contextLength int, hfToken string) string
 	// BuildRawCommand returns a human-readable command for --create-instance-only output.
 	BuildRawCommand(model *entity.Model, numGPUs, contextLength int) string
-	// VolumeMountPath returns where to mount the persistent volume
-	VolumeMountPath() string
 	// RestartCommands returns the kill and start commands for restarting the server
 	RestartCommands(model *entity.Model) (killCmd string, startCmd string)
 }
@@ -82,24 +61,28 @@ type SSHTunnelProvider interface {
 }
 
 type OfferResult struct {
-	ID            int
-	GPUName       string
-	NumGPUs       int     // actual GPU count on this offer
-	GPUMemory     float64 // per-GPU VRAM in MB as reported by vast.ai
-	DPHTotal      float64
-	MachineID     int
-	AvailVolAskID *int    // volume offer on this machine (nil if none)
-	AvailVolSize  float64 // available volume size in GB
+	ID        int
+	GPUName   string
+	NumGPUs   int     // actual GPU count on this offer
+	GPUMemory float64 // per-GPU VRAM in MB as reported by vast.ai
+	DPHTotal  float64
+	MachineID int
 }
+
+// defaultDiskGB is the container disk requested when a model doesn't specify one.
+const defaultDiskGB = 40
+
+// diskHeadroomGB is added to a model's disk request when filtering host offers:
+// the vllm-openai image is ~15 GB and we want scratch on top of the model download.
+const diskHeadroomGB = 25
 
 type DeployService struct {
 	models    repository.ModelRepository
 	instances repository.InstanceRepository
-	volumes   repository.VolumeRepository
 	badHosts  repository.BadHostRepository
 	vastai    VastaiProvider
 	ssh       SSHTunnelProvider
-	engines   map[entity.ModelEngine]EngineProvider
+	engine    EngineProvider
 	basePort  int
 	hfToken   string
 }
@@ -107,30 +90,41 @@ type DeployService struct {
 func NewDeployService(
 	models repository.ModelRepository,
 	instances repository.InstanceRepository,
-	volumes repository.VolumeRepository,
 	badHosts repository.BadHostRepository,
 	vastai VastaiProvider,
 	ssh SSHTunnelProvider,
-	engines map[entity.ModelEngine]EngineProvider,
+	engine EngineProvider,
 	basePort int,
 	hfToken string,
 ) *DeployService {
 	return &DeployService{
 		models:    models,
 		instances: instances,
-		volumes:   volumes,
 		badHosts:  badHosts,
 		vastai:    vastai,
 		ssh:       ssh,
-		engines:   engines,
+		engine:    engine,
 		basePort:  basePort,
 		hfToken:   hfToken,
 	}
 }
 
+// diskFor returns the container disk size (GB) to request for a model.
+func diskFor(model *entity.Model) int {
+	if model.DiskGB > 0 {
+		return model.DiskGB
+	}
+	return defaultDiskGB
+}
+
 // markHostBad records a machine_id as bad so future SearchOffers skip it.
 // Tolerant of a nil repo or a DB error — the deploy already failed, we just
 // want to record what we can without masking the original error.
+//
+// IMPORTANT: only call this for *host-side* failures (instance never reached
+// running, SSH never came up). Model-side failures (server crashed, health
+// timed out) are not the host's fault, and blaming the host would slowly
+// blacklist every good machine until "no offers found".
 func (s *DeployService) markHostBad(machineID int, reason string) {
 	if s.badHosts == nil || machineID == 0 {
 		return
@@ -170,15 +164,6 @@ func (s *DeployService) filterBadHosts(offers []OfferResult) []OfferResult {
 	return out
 }
 
-// engineFor returns the EngineProvider for the given model, defaulting to vLLM.
-func (s *DeployService) engineFor(model *entity.Model) EngineProvider {
-	eng := model.Engine
-	if eng == "" {
-		eng = entity.EngineVLLM
-	}
-	return s.engines[eng]
-}
-
 // scaledContextLength grows model.ContextLength linearly with per-GPU VRAM
 // headroom, capped at model.MaxContextLength. If MaxContextLength is unset or
 // the offer doesn't report more VRAM than baseline, the baseline is returned.
@@ -211,8 +196,9 @@ func scaledContextLength(model *entity.Model, offerGPUMemoryMB float64) int {
 }
 
 // Deploy executes the full init flow: find offer → create instance → SSH → vLLM → tunnel.
-// Unless noVolume is true, a volume is auto-created if none exists.
-func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume bool) (*entity.Instance, error) {
+// Instances are disposable: if any step after creation fails, the vast.ai instance
+// is destroyed and the tunnel killed so a failed deploy never leaves a paid GPU running.
+func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *entity.Instance, err error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -232,8 +218,10 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 	if numGPUs <= 0 {
 		numGPUs = 1
 	}
-	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM...\n", numGPUs, model.VRAM)
-	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs)
+	diskGB := diskFor(model)
+	minHostDisk := diskGB + diskHeadroomGB
+	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM (host disk >= %dGB)...\n", numGPUs, model.VRAM, minHostDisk)
+	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk)
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
@@ -244,29 +232,46 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 	offer := offers[0] // cheapest (already sorted)
 	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
 
-	engine := s.engineFor(model)
 	contextLength := scaledContextLength(model, offer.GPUMemory)
 	if contextLength > 0 && contextLength != model.ContextLength {
 		fmt.Printf("Context length scaled: %d → %d (offer has %.0fGB per GPU vs baseline %dGB)\n",
 			model.ContextLength, contextLength, offer.GPUMemory/1024.0, model.VRAM)
 	}
-	onstart := engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
+	onstart := s.engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
 
-	envVars := map[string]string{}
-	if s.hfToken != "" {
-		envVars["HF_TOKEN"] = s.hfToken
-		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
-	}
+	envVars := s.engineEnv()
 
-	instanceID, volumeID, _, err := s.createInstanceWithVolumeRetry(ctx, offer, engine, envVars, onstart, noVolume)
+	fmt.Printf("Creating instance (disk %dGB)...\n", diskGB)
+	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(), envVars, onstart, diskGB)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create instance: %w", err)
 	}
 	fmt.Printf("Instance created: %d\n", instanceID)
 
+	// From here on the vast.ai instance is billing. Any failure must tear it
+	// down (and the tunnel + DB row) so a failed startup leaves nothing running.
+	deployed := false
+	tunnelPID := 0
+	defer func() {
+		if deployed {
+			return
+		}
+		if tunnelPID > 0 {
+			_ = s.ssh.StopTunnel(tunnelPID)
+		}
+		if destroyErr := s.vastai.DestroyInstance(instanceID); destroyErr != nil {
+			fmt.Printf("Warning: failed to destroy instance %d during cleanup: %v\n", instanceID, destroyErr)
+		}
+		if inst != nil && inst.ID > 0 {
+			_ = s.instances.Delete(inst.ID)
+		}
+		fmt.Printf("Destroyed instance %d after failed deploy (no further charges).\n", instanceID)
+	}()
+
 	fmt.Println("Waiting for instance to start...")
-	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID, volumeID)
+	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
 	if err != nil {
+		// Instance never reached running → host-side problem, blacklist it.
 		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for instance: %v", err))
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
@@ -274,6 +279,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 
 	fmt.Println("Waiting for SSH...")
 	if err := s.ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
+		// SSH never came up → host-side problem, blacklist it.
 		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for SSH: %v", err))
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
@@ -284,12 +290,12 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 	}
 
 	fmt.Printf("Starting SSH tunnel on port %d...\n", localPort)
-	tunnelPID, err := s.ssh.StartTunnel(localPort, sshHost, sshPort)
+	tunnelPID, err = s.ssh.StartTunnel(localPort, sshHost, sshPort)
 	if err != nil {
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}
 
-	inst := &entity.Instance{
+	inst = &entity.Instance{
 		VastaiID:   int64(instanceID),
 		ModelName:  model.Name,
 		Status:     entity.StatusRunning,
@@ -298,7 +304,6 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 		SSHPort:    sshPort,
 		TunnelPID:  tunnelPID,
 		HourlyRate: hourlyRate,
-		VolumeID:   int64(volumeID),
 		NumGPUs:    offer.NumGPUs,
 	}
 	if err := s.instances.Save(inst); err != nil {
@@ -307,23 +312,82 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, noVolume b
 
 	fmt.Println("Waiting for model server to become healthy (model downloading, this may take a while)...")
 	healthCh := make(chan error, 1)
+	failCh := make(chan error, 1)
 	go func() {
 		healthCh <- s.ssh.WaitForVLLMHealth(ctx, localPort)
 	}()
+	// Liveness watcher: if the vllm process dies during startup, abort early
+	// with the tail of its log instead of polling a dead port until timeout.
+	go s.watchServerProcess(ctx, sshHost, sshPort, failCh)
 
 	select {
-	case err := <-healthCh:
-		if err != nil {
-			s.markHostBad(offer.MachineID, fmt.Sprintf("health check: %v", err))
-			return nil, fmt.Errorf("vLLM health check: %w", err)
+	case healthErr := <-healthCh:
+		if healthErr != nil {
+			// Model-side failure — do NOT blacklist the host.
+			return nil, fmt.Errorf("vLLM health check: %w", healthErr)
 		}
+	case crashErr := <-failCh:
+		return nil, fmt.Errorf("model server crashed during startup: %w", crashErr)
 	case <-ctx.Done():
-		s.markHostBad(offer.MachineID, fmt.Sprintf("startup timed out after %s", timeout))
-		return nil, fmt.Errorf("startup timed out after %s (tunnel still running at localhost:%d)", timeout, localPort)
+		return nil, fmt.Errorf("startup timed out after %s", timeout)
 	}
 
+	deployed = true
 	fmt.Printf("\nAPI available at: http://localhost:%d/v1\n", localPort)
 	return inst, nil
+}
+
+// watchServerProcess polls the remote host over SSH and reports (via failCh)
+// when the vllm process is no longer running, so Deploy can fail fast on a
+// crash instead of waiting out the full startup timeout. It requires two
+// consecutive "dead" reads to avoid a false positive during a brief re-exec.
+func (s *DeployService) watchServerProcess(ctx context.Context, sshHost string, sshPort int, failCh chan<- error) {
+	// Grace period: let the onstart script write itself and launch vllm.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(90 * time.Second):
+	}
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	deadCount := 0
+	for {
+		out, err := s.ssh.RunRemoteCommand(sshHost, sshPort,
+			"pgrep -f 'vllm serve' >/dev/null 2>&1 && echo ALIVE || echo DEAD")
+		switch {
+		case err != nil:
+			deadCount = 0 // SSH hiccup, not a crash signal
+		case strings.Contains(string(out), "DEAD"):
+			deadCount++
+			if deadCount >= 2 {
+				logTail, _ := s.ssh.RunRemoteCommand(sshHost, sshPort, "tail -n 25 /tmp/vllm.log 2>/dev/null")
+				failCh <- fmt.Errorf("vllm process is no longer running; last log lines:\n%s",
+					strings.TrimSpace(string(logTail)))
+				return
+			}
+		default:
+			deadCount = 0
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// engineEnv builds the per-instance environment (HF token for gated repos /
+// higher download rate limits).
+func (s *DeployService) engineEnv() map[string]string {
+	env := map[string]string{}
+	if s.hfToken != "" {
+		env["HF_TOKEN"] = s.hfToken
+		env["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
+	}
+	return env
 }
 
 type CreateOnlyResult struct {
@@ -332,8 +396,9 @@ type CreateOnlyResult struct {
 }
 
 // DeployCreateOnly creates the instance and waits for it to be running, but does not
-// set up the SSH tunnel or wait for vLLM health. Returns the instance with SSH details.
-func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, noVolume bool) (*CreateOnlyResult, error) {
+// set up the SSH tunnel or wait for vLLM health. The instance is intentionally left
+// running so the user can attach manually — no failure cleanup here.
+func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string) (*CreateOnlyResult, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -351,8 +416,10 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 	if numGPUs <= 0 {
 		numGPUs = 1
 	}
-	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM...\n", numGPUs, model.VRAM)
-	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs)
+	diskGB := diskFor(model)
+	minHostDisk := diskGB + diskHeadroomGB
+	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM (host disk >= %dGB)...\n", numGPUs, model.VRAM, minHostDisk)
+	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk)
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
@@ -363,24 +430,18 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 	offer := offers[0]
 	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
 
-	engine := s.engineFor(model)
 	contextLength := scaledContextLength(model, offer.GPUMemory)
-	onstart := engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
+	onstart := s.engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
 
-	envVars := map[string]string{}
-	if s.hfToken != "" {
-		envVars["HF_TOKEN"] = s.hfToken
-		envVars["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
-	}
-
-	instanceID, volumeID, _, err := s.createInstanceWithVolumeRetry(ctx, offer, engine, envVars, onstart, noVolume)
+	fmt.Printf("Creating instance (disk %dGB)...\n", diskGB)
+	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(), s.engineEnv(), onstart, diskGB)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create instance: %w", err)
 	}
 	fmt.Printf("Instance created: %d\n", instanceID)
 
 	fmt.Println("Waiting for instance to start...")
-	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID, volumeID)
+	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
 	if err != nil {
 		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for instance: %v", err))
 		return nil, fmt.Errorf("wait for instance: %w", err)
@@ -393,14 +454,13 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 		SSHHost:    sshHost,
 		SSHPort:    sshPort,
 		HourlyRate: hourlyRate,
-		VolumeID:   int64(volumeID),
 		NumGPUs:    offer.NumGPUs,
 	}
 	if err := s.instances.Save(inst); err != nil {
 		return nil, fmt.Errorf("save instance: %w", err)
 	}
 
-	return &CreateOnlyResult{Instance: inst, ServeCommand: engine.BuildRawCommand(model, offer.NumGPUs, contextLength)}, nil
+	return &CreateOnlyResult{Instance: inst, ServeCommand: s.engine.BuildRawCommand(model, offer.NumGPUs, contextLength)}, nil
 }
 
 // Stop stops a single instance by local DB ID.
@@ -423,7 +483,7 @@ func (s *DeployService) Stop(ctx context.Context, id int64) error {
 	return s.instances.Update(inst)
 }
 
-// Destroy destroys a single instance and its volumes permanently.
+// Destroy destroys a single instance permanently.
 func (s *DeployService) Destroy(ctx context.Context, id int64) error {
 	inst, err := s.instances.FindByID(id)
 	if err != nil {
@@ -436,20 +496,6 @@ func (s *DeployService) Destroy(ctx context.Context, id int64) error {
 
 	if err := s.vastai.DestroyInstance(int(inst.VastaiID)); err != nil {
 		return fmt.Errorf("destroy vast.ai instance: %w", err)
-	}
-
-	if inst.VolumeID > 0 {
-		vols, _ := s.volumes.FindAll()
-		for _, vol := range vols {
-			if vol.VastaiID == inst.VolumeID {
-				fmt.Printf("Deleting volume %d (%s)...\n", vol.ID, vol.VolumeName)
-				if err := s.vastai.DeleteVolume(int(vol.VastaiID)); err != nil {
-					fmt.Printf("Warning: could not delete volume from vast.ai: %v\n", err)
-				}
-				s.volumes.Delete(vol.ID)
-				break
-			}
-		}
 	}
 
 	return s.instances.Delete(inst.ID)
@@ -467,8 +513,6 @@ func (s *DeployService) Restart(ctx context.Context, id int64) error {
 		return fmt.Errorf("model lookup: %w", err)
 	}
 
-	engine := s.engineFor(model)
-
 	// Regenerate the startup script on the instance so fixes are picked up.
 	// Use the GPU count actually allocated at deploy time (persisted on the instance row),
 	// falling back to model.NumGPUs for legacy rows that predate the column.
@@ -478,7 +522,7 @@ func (s *DeployService) Restart(ctx context.Context, id int64) error {
 		numGPUs = model.NumGPUs
 	}
 	fmt.Println("Updating startup script...")
-	onstart := engine.BuildOnstart(model, numGPUs, model.ContextLength, s.hfToken)
+	onstart := s.engine.BuildOnstart(model, numGPUs, model.ContextLength, s.hfToken)
 	// BuildOnstart returns: echo '...' > /tmp/script.sh && chmod +x ... && bash ...
 	// Strip the final "&& bash ..." to only write the file without executing
 	if idx := strings.LastIndex(onstart, " && bash "); idx > 0 {
@@ -486,7 +530,7 @@ func (s *DeployService) Restart(ctx context.Context, id int64) error {
 		s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, writeOnly)
 	}
 
-	killCmd, startCmd := engine.RestartCommands(model)
+	killCmd, startCmd := s.engine.RestartCommands(model)
 
 	fmt.Printf("Restarting model server on instance %d (%s)...\n", inst.ID, inst.ModelName)
 
@@ -501,130 +545,4 @@ func (s *DeployService) Restart(ctx context.Context, id int64) error {
 
 	fmt.Println("Restart initiated. Use 'mycodeagent log -f' to monitor.")
 	return nil
-}
-
-const defaultVolumeSizeGB = 50
-
-// createInstanceWithVolumeRetry resolves the volume for the offer's machine and
-// creates the instance. If vast.ai rejects the call with a stale-volume 404
-// (e.g. the volume was auto-removed by vast.ai or left over from a failed run),
-// it deletes the local DB record and retries once with a freshly rented volume.
-func (s *DeployService) createInstanceWithVolumeRetry(
-	ctx context.Context, offer OfferResult, engine EngineProvider, envVars map[string]string,
-	onstart string, noVolume bool,
-) (instanceID int, volumeID int, mountPath string, err error) {
-	var reused bool
-	if !noVolume {
-		volumeID, mountPath, reused, err = s.ensureVolume(ctx, offer, engine.VolumeMountPath())
-		if err != nil {
-			return 0, 0, "", err
-		}
-	}
-
-	fmt.Println("Creating instance...")
-	instanceID, err = s.vastai.CreateInstance(offer.ID, engine.DockerImage(), envVars, onstart, volumeID, mountPath)
-	if err == nil {
-		return instanceID, volumeID, mountPath, nil
-	}
-
-	// Stale-volume retry: only meaningful when the volume came from the local DB.
-	// A freshly rented volume has already been verified ready, so a 404 there means
-	// something else is wrong and retrying would just orphan more volumes.
-	if !noVolume && reused && volumeID > 0 && isStaleVolumeError(err) {
-		fmt.Printf("Volume V.%d is stale on vast.ai — removing local record and renting a fresh one\n", volumeID)
-		if delErr := s.deleteLocalVolumeByVastaiID(int64(volumeID)); delErr != nil {
-			fmt.Printf("Warning: failed to remove stale volume record: %v\n", delErr)
-		}
-		volumeID, mountPath, _, err = s.ensureVolume(ctx, offer, engine.VolumeMountPath())
-		if err != nil {
-			return 0, 0, "", err
-		}
-		fmt.Println("Creating instance (retry with fresh volume)...")
-		instanceID, err = s.vastai.CreateInstance(offer.ID, engine.DockerImage(), envVars, onstart, volumeID, mountPath)
-		if err != nil {
-			return 0, 0, "", fmt.Errorf("create instance after volume refresh: %w", err)
-		}
-		return instanceID, volumeID, mountPath, nil
-	}
-
-	return 0, 0, "", fmt.Errorf("create instance: %w", err)
-}
-
-// isStaleVolumeError detects vast.ai's 404 response when a volume_id no longer exists.
-func isStaleVolumeError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "404") &&
-		strings.Contains(msg, "Volume") &&
-		strings.Contains(msg, "does not exist")
-}
-
-// deleteLocalVolumeByVastaiID removes a volume row from SQLite by its vast.ai ID.
-func (s *DeployService) deleteLocalVolumeByVastaiID(vastaiID int64) error {
-	vols, err := s.volumes.FindAll()
-	if err != nil {
-		return err
-	}
-	for _, v := range vols {
-		if v.VastaiID == vastaiID {
-			return s.volumes.Delete(v.ID)
-		}
-	}
-	return nil
-}
-
-// ensureVolume returns an existing or newly created volume for the offer's machine.
-// When a new volume is rented, it waits for vast.ai to transition the volume out of
-// "initialized" state before returning, otherwise CreateInstance will reject it.
-// The reused return value is true when an existing local DB row was reused (so the
-// caller can decide whether a subsequent 404 should trigger a stale-row cleanup).
-func (s *DeployService) ensureVolume(ctx context.Context, offer OfferResult, mountPath string) (volumeID int, mount string, reused bool, err error) {
-	// Reuse existing volume on this machine (trust local DB — API doesn't show unattached volumes)
-	vols, _ := s.volumes.FindAll()
-	for _, vol := range vols {
-		if vol.MachineID == offer.MachineID {
-			fmt.Printf("Using existing volume %s on machine %d\n", vol.VolumeName, vol.MachineID)
-			return int(vol.VastaiID), vol.MountPath, true, nil
-		}
-	}
-
-	// Create new volume
-	if offer.AvailVolAskID == nil {
-		return 0, "", false, fmt.Errorf("machine %d has no volume offer", offer.MachineID)
-	}
-
-	fmt.Printf("Creating volume (%d GB) on machine %d...\n", defaultVolumeSizeGB, offer.MachineID)
-	result, err := s.vastai.RentVolume(*offer.AvailVolAskID, defaultVolumeSizeGB)
-	if err != nil {
-		return 0, "", false, fmt.Errorf("create volume: %w", err)
-	}
-
-	// Parse volume ID from name (e.g. "V.34258398" → 34258398)
-	var vastaiID int
-	if strings.HasPrefix(result.VolumeName, "V.") {
-		fmt.Sscanf(result.VolumeName[2:], "%d", &vastaiID)
-	}
-	if vastaiID == 0 {
-		return 0, "", false, fmt.Errorf("could not parse volume ID from %s", result.VolumeName)
-	}
-
-	vol := &entity.Volume{
-		VastaiID:   int64(vastaiID),
-		VolumeName: result.VolumeName,
-		SizeGB:     defaultVolumeSizeGB,
-		MountPath:  mountPath,
-		MachineID:  offer.MachineID,
-	}
-	if err := s.volumes.Save(vol); err != nil {
-		return 0, "", false, fmt.Errorf("save volume: %w", err)
-	}
-
-	fmt.Printf("Volume %s created on machine %d\n", result.VolumeName, offer.MachineID)
-	fmt.Println("Waiting for volume to leave 'initialized' state...")
-	if err := s.vastai.WaitForVolumeReady(ctx, vastaiID); err != nil {
-		return 0, "", false, fmt.Errorf("wait for volume ready: %w", err)
-	}
-	return vastaiID, mountPath, false, nil
 }

@@ -43,18 +43,7 @@ func migrate(db *sql.DB) error {
 			tunnel_pid  INTEGER,
 			hourly_rate REAL,
 			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			volume_id   INTEGER NOT NULL DEFAULT 0,
-			num_gpus    INTEGER NOT NULL DEFAULT 0,
-			volume_name TEXT    NOT NULL DEFAULT ''
-		);
-		CREATE TABLE IF NOT EXISTS volumes (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			vastai_id   INTEGER NOT NULL,
-			volume_name TEXT    NOT NULL,
-			size_gb     INTEGER NOT NULL,
-			mount_path  TEXT    NOT NULL DEFAULT '/root/.cache/huggingface',
-			machine_id  INTEGER NOT NULL DEFAULT 0,
-			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			num_gpus    INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS bad_hosts (
 			machine_id INTEGER PRIMARY KEY,
@@ -65,12 +54,9 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	// Migration: add volume_id column if missing (existing DBs)
-	db.Exec("ALTER TABLE instances ADD COLUMN volume_id INTEGER NOT NULL DEFAULT 0")
-	// Migration: add num_gpus column so restart can re-emit the right --tensor-parallel-size
+	// Migration: add num_gpus column so restart can re-emit the right --tensor-parallel-size.
+	// (Older DBs may also carry now-unused volume_id / volume_name columns; the instance
+	// repo selects columns explicitly so leftover columns are harmless.)
 	db.Exec("ALTER TABLE instances ADD COLUMN num_gpus INTEGER NOT NULL DEFAULT 0")
-	// Migration: add volume_name column so ps can render volume info without
-	// querying vast.ai (Sync populates it from the remote ExtraEnv data).
-	db.Exec("ALTER TABLE instances ADD COLUMN volume_name TEXT NOT NULL DEFAULT ''")
 	return nil
 }

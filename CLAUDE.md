@@ -12,12 +12,14 @@ Key reference: https://docs.vast.ai/api-reference/introduction
 
 | Command | Purpose |
 |---|---|
-| `mycodeagent models` | List available models (coding, fiction writing, dolphin) |
-| `mycodeagent init <model>` | Deploy model: autoload from HuggingFace, start vLLM, establish SSH tunnel, save PID to `~/.mycodeagent/sqlite` |
-| `mycodeagent ps` | List deployed instances (PID → Model Name) |
-| `mycodeagent stop <PID>` | Stop a specific instance |
-| `mycodeagent kill` | Kill all instances |
-| `mycodeagent pull` | Sync instance list from vast.ai |
+| `mycodeagent models` | List available models with live cheapest-offer pricing |
+| `mycodeagent init <model>` | Deploy model: rent GPU, start vLLM (downloads from HuggingFace), establish SSH tunnel. Destroys the instance automatically if startup fails. |
+| `mycodeagent ps` | Sync with vast.ai and list deployed instances |
+| `mycodeagent stop <id>` | Stop an instance (keeps the vast.ai instance; can restart) |
+| `mycodeagent kill <id>` | Destroy an instance permanently |
+| `mycodeagent restart <id>` | Regenerate the startup script and restart the server |
+| `mycodeagent tunnel <vastai_id>` | Re-attach an SSH tunnel to a running instance |
+| `mycodeagent log <id>` | Fetch the vast.ai bootstrap log |
 | `mycodeagent budget` | Show consumption by instances |
 
 ## Architecture
@@ -39,12 +41,13 @@ Dependencies point inward: Infrastructure → Domain ← Application. Domain has
 
 ## Infrastructure Details
 
-- Models run via **vLLM** (`vllm/vllm-openai` image) on vast.ai GPU instances
-- Models auto-download from HuggingFace on first launch; cached at `/root/.cache/huggingface/`
-- HF_TOKEN only needed for gated models (Llama 3, some Mistral); Qwen3, Magnum, GLM are public
-- SSH tunnels forward a local port to the remote vLLM port 8000
-- Each `init` allocates a new local port to allow multiple concurrent models
-- State persisted in `~/.mycodeagent/sqlite`
+- **vLLM is the only engine** (`vllm/vllm-openai` image). All catalog models are vLLM-servable quants (AWQ or FP8) — never GGUF.
+- **Instances are disposable / pay-as-you-go.** No persistent volumes: the model downloads to the container disk each `init` and is gone when the instance is destroyed. `init` requests a per-model container disk (`Model.DiskGB`) sized to hold the download + scratch.
+- **Failed deploys self-destroy.** If the server crashes or startup times out, `Deploy` destroys the vast.ai instance and kills the tunnel so a failed `init` never leaves a paid GPU running. A liveness watcher fails fast on a crashed `vllm serve` instead of waiting out the full timeout.
+- Models auto-download from HuggingFace on launch; cached at `/root/.cache/huggingface/` (on the ephemeral container disk).
+- HF_TOKEN only needed for gated models; the current catalog (Qwen, dolphin) is public.
+- SSH tunnels forward a local port to the remote vLLM port 8000; each `init` allocates a new local port for concurrency.
+- State persisted in `~/.mycodeagent/mycodeagent.db` (SQLite). Host blacklisting (`bad_hosts`) is applied only for host-side failures, never model-side crashes.
 
 @docs/Solution.md
 

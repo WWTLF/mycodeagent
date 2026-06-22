@@ -33,8 +33,8 @@ func NewPsCmd(app *application.App) *cobra.Command {
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tALIAS\tMODEL\tVOLUME\tHEALTH\tTUNNEL URL")
-			fmt.Fprintln(w, "--\t-------\t------\t-----\t-----\t------\t------\t----------")
+			fmt.Fprintln(w, "ID\tVAST ID\tSTATUS\tALIAS\tMODEL\tHEALTH\tTUNNEL URL")
+			fmt.Fprintln(w, "--\t-------\t------\t-----\t-----\t------\t----------")
 
 			for _, inst := range instances {
 				tunnelURL := "-"
@@ -58,13 +58,8 @@ func NewPsCmd(app *application.App) *cobra.Command {
 					alias = m.Alias
 				}
 
-				volName := inst.VolumeName
-				if volName == "" {
-					volName = "-"
-				}
-
-				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					inst.ID, inst.VastaiID, inst.Status, alias, inst.ModelName, volName, health, tunnelURL)
+				fmt.Fprintf(w, "%d\t%d\t%s\t%s\t%s\t%s\t%s\n",
+					inst.ID, inst.VastaiID, inst.Status, alias, inst.ModelName, health, tunnelURL)
 			}
 			return w.Flush()
 		},

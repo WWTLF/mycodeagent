@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-`mycodeagent` is a Go CLI tool that deploys and manages vLLM- and LM Studio-based coding/writing models on [vast.ai](https://vast.ai). It abstracts the vast.ai API, model-server startup, SSH tunnel management, and lifecycle operations.
+`mycodeagent` is a Go CLI tool that deploys and manages vLLM-based coding/writing models on [vast.ai](https://vast.ai). It abstracts the vast.ai API, vLLM startup, SSH tunnel management, and lifecycle operations. Instances are disposable (pay-as-you-go) — there are no persistent volumes.
 
 ## Layer Architecture
 
@@ -41,12 +41,12 @@ make clean              # rm -f mycodeagent
 ./mycodeagent models            # list available models
 ./mycodeagent init <name>       # deploy a model to vast.ai
 ./mycodeagent ps                # show running instances
-./mycodeagent stop <id>         # stop by DB ID
-./mycodeagent kill              # stop all instances
+./mycodeagent stop <id>         # stop by DB ID (keeps instance)
+./mycodeagent kill <id>         # destroy an instance permanently
+./mycodeagent restart <id>      # restart the model server
 ./mycodeagent budget            # show consumption by instances
 ./mycodeagent tunnel <vastai_id># re-attach SSH tunnel
 ./mycodeagent log <id>          # show vast.ai bootstrap logs
-./mycodeagent volume            # manage persistent volumes
 ./mycodeagent hosts             # manage bad hosts blacklist
 ```
 
@@ -123,20 +123,19 @@ base_port: 8000
 
 ## Operational Notes
 
-- **VLLM image:** `vllm/vllm-openai:v0.19.0` is the current default
-- **HF_TOKEN:** Required for gated models (Llama 3, some Mistral variants). Qwen3/2.5, GLM-E are public.
+- **VLLM image:** `vllm/vllm-openai:v0.19.0` is the only engine image. All catalog models are AWQ/FP8 quants (never GGUF).
+- **HF_TOKEN:** Required only for gated models. The current catalog (Qwen, dolphin) is public.
 - **SSH tunnels:** Forward local ports to remote vLLM port 8000. Each `init` allocates a new local port for concurrency.
-- **Volume mount:** vLLM models cache in `/root/.cache/huggingface/`; LM Studio GGUF models cache in `/root/.lmstudio/models/`
+- **Storage:** No persistent volumes. The HF cache lives on the ephemeral container disk (sized per model via `Model.DiskGB`) and is discarded on destroy.
+- **Disposable instances:** A failed `init` (crash or timeout) auto-destroys the vast.ai instance + tunnel so nothing keeps billing. A liveness watcher detects a dead `vllm serve` and fails fast.
 - **SSH/tunnel operations:** Shell out to `ssh` and manage lifecycle via process PID + TCP/HTTP checks
 - **Context usage:** Always pass a real `context.Context` (typically `context.WithTimeout` or `context.WithCancel`), never `&context.Context{}`
-- **Model context window:** Qwen3-32B-AWQ is ~32K tokens
 
 ## Database Schema
 
 Auto-migrated tables in SQLite:
-- `instances` - deployed instances with tunnel PID, local port, status
-- `volumes` - persistent volumes for model caching
-- `bad_hosts` - blacklisted machine IDs to avoid during offer selection
+- `instances` - deployed instances with tunnel PID, local port, status, GPU count
+- `bad_hosts` - blacklisted machine IDs (host-side failures only) skipped during offer selection
 
 ## Key Files
 
@@ -148,7 +147,7 @@ Auto-migrated tables in SQLite:
 - **Repository implementations:** `internal/infrastructure/persistence/`
 - **vast.ai client:** `internal/infrastructure/vastai/client.go`
 - **SSH tunnel:** `internal/infrastructure/ssh/tunnel.go`
-- **Engines:** `internal/infrastructure/engine/` (vllm.go, lmstudio.go, llamacpp.go)
+- **Engine:** `internal/infrastructure/engine/vllm.go` (the only engine)
 - **Config loading:** `internal/infrastructure/config/config.go`
 
 ## Commands
@@ -158,13 +157,12 @@ All CLI commands live in `cmd/mycodeagent/commands/` and are wired in `main.go`:
 - `models` - list model catalog with pricing
 - `init` - deploy and tunnel
 - `ps` - list/sync instances
-- `stop` - stop instance
-- `kill` - destroy all instances
+- `stop` - stop instance (keeps it)
+- `kill` - destroy an instance permanently
 - `budget` - spending breakdown
 - `tunnel` - re-establish SSH tunnel
 - `log` - fetch bootstrap logs
 - `info` - runtime info
 - `config` - write opencode config
 - `restart` - restart model server
-- `volume` - volume CRUD
 - `hosts` - bad host management

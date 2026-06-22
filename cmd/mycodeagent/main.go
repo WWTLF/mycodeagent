@@ -6,7 +6,6 @@ import (
 
 	"github.com/WWTLF/mycodeagent/cmd/mycodeagent/commands"
 	"github.com/WWTLF/mycodeagent/internal/application"
-	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/WWTLF/mycodeagent/internal/domain/service"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/config"
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/engine"
@@ -33,32 +32,26 @@ func main() {
 
 	modelRepo := persistence.NewStaticModelRepository()
 	instanceRepo := persistence.NewSQLiteInstanceRepository(db)
-	volumeRepo := persistence.NewSQLiteVolumeRepository(db)
 	badHostRepo := persistence.NewSQLiteBadHostRepository(db)
 
 	vastaiAdapter := vastai.NewAdapter(cfg.VastaiAPIKey)
 	sshAdapter := ssh.NewAdapter()
 
-	engines := map[entity.ModelEngine]service.EngineProvider{
-		entity.EngineVLLM:     engine.NewVLLMEngine(),
-		entity.EngineLMStudio: engine.NewLMStudioEngine(),
-		entity.EngineLlamaCpp: engine.NewLlamaCppEngine(),
-	}
+	vllmEngine := engine.NewVLLMEngine()
 
 	deploySvc := service.NewDeployService(
-		modelRepo, instanceRepo, volumeRepo, badHostRepo,
-		vastaiAdapter, sshAdapter, engines,
+		modelRepo, instanceRepo, badHostRepo,
+		vastaiAdapter, sshAdapter, vllmEngine,
 		cfg.BasePort, cfg.HFToken,
 	)
 
-	volumeSvc := service.NewVolumeService(volumeRepo, vastaiAdapter)
 	modelSvc := service.NewModelService(modelRepo)
 	badHostSvc := service.NewBadHostService(badHostRepo)
 	probe := serverprobe.New()
 	instanceSvc := service.NewInstanceService(instanceRepo, vastaiAdapter, sshAdapter, probe, modelSvc, cfg.BasePort)
 	credentialStore := config.NewStore()
 
-	app := application.NewApp(deploySvc, volumeSvc, instanceSvc, modelSvc, badHostSvc, credentialStore, cfg.VastaiAPIKey, cfg.HFToken)
+	app := application.NewApp(deploySvc, instanceSvc, modelSvc, badHostSvc, credentialStore, cfg.VastaiAPIKey, cfg.HFToken)
 
 	rootCmd := &cobra.Command{
 		Use:           "mycodeagent",
@@ -85,7 +78,6 @@ func main() {
 		commands.NewInfoCmd(app),
 		commands.NewConfigCmd(app),
 		commands.NewRestartCmd(app),
-		commands.NewVolumeCmd(app),
 		commands.NewHostsCmd(app),
 	)
 
