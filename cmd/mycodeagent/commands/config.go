@@ -136,6 +136,17 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 			}
 
 			cfg["provider"] = providers
+
+			// Preserve the user's chosen default if it still points to a running
+			// provider; only fall back to the first instance when there's no
+			// existing default or the existing one no longer exists.
+			existingDefault, _ := cfg["model"].(string)
+			if existingDefault != "" {
+				providerKey, _, _ := strings.Cut(existingDefault, "/")
+				if _, ok := providers[providerKey]; ok {
+					defaultModel = existingDefault
+				}
+			}
 			cfg["model"] = defaultModel
 
 			// Set mode temperatures (Qwen3 thinking requires 0.6, greedy decoding breaks thinking)

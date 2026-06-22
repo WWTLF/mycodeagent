@@ -22,34 +22,51 @@ Infrastructure
   └─> API impl              → SSH/tunnel operations, HTTP to vast.ai
 ```
 
-**Domain layer must not depend on infrastructure packages or external SDK clients.**
-Domain entities should stay minimal; `time` is allowed for timestamps.
+**Critical layering rule (enforced by code review):**
+- `commands → application.App → domain/service → domain/repository`
+- `application` must **NEVER** import any package under `internal/infrastructure/`
+- `application` must **NEVER** call repository methods directly
+- Domain layer must not depend on infrastructure packages or external SDK clients
 
 ## Build & Run
 
 ```bash
-go build -o mycodeagent ./cmd/mycodeagent
-./mycodeagent models      # list available models
-./mycodeagent init <name> # deploy a model to vast.ai
-./mycodeagent ps          # show running instances
-./mycodeagent stop <id>   # stop by DB ID
-./mycodeagent kill        # stop all instances
+make build              # go build -o mycodeagent ./cmd/mycodeagent
+make run                # go run ./cmd/mycodeagent
+make test               # go test ./...
+make clean              # rm -f mycodeagent
+```
+
+```bash
+./mycodeagent models            # list available models
+./mycodeagent init <name>       # deploy a model to vast.ai
+./mycodeagent ps                # show running instances
+./mycodeagent stop <id>         # stop by DB ID
+./mycodeagent kill              # stop all instances
+./mycodeagent budget            # show consumption by instances
+./mycodeagent tunnel <vastai_id># re-attach SSH tunnel
+./mycodeagent log <id>          # show vast.ai bootstrap logs
+./mycodeagent volume            # manage persistent volumes
+./mycodeagent hosts             # manage bad hosts blacklist
 ```
 
 ## Testing
 
+**There are currently no `*_test.go` files in this repository.**
+
+When adding tests:
 ```bash
 go test ./...                          # run all tests
 go test -v ./internal/domain/...       # run domain package tests only
 go test -run TestDeployService/Deploy  # run single test with pattern
 go test -count=1 ./...                 # remove parallelization artifacts
-go test -race ...                      # race detection
+go test -race ./...                    # race detection
 ```
 
-## Code Style Guidelines
+## Code Style
 
-### Imports - strict order (matches std: go fmt)
-
+### Imports
+Standard Go ordering (enforced by `gofmt`):
 ```go
 import (
     "fmt"                    // standard library
@@ -61,92 +78,93 @@ import (
 )
 ```
 
-**Rules:**
-- Standard library first (alphabetical)
-- Named 2nd-party imports
-- Package imports last (with module path prefixes)
-- No blank `ignore` imports needed; unused imports trigger lint errors
-
-### Formatting & Linting
-
+### Formatting
 ```bash
 gofmt -w .       # auto-format all Go files
-golangci-lint run --fix
-staticcheck ./...
 ```
 
-Run before committing or pushing: `go build -o mycodeagent ./cmd/mycodeagent && (gofmt -l . | grep -v '^$' || true)`
+Pre-commit check: `go build -o mycodeagent ./cmd/mycodeagent && (gofmt -l . | grep -v '^$' || true)`
+
+**Note:** No `golangci-lint` or `staticcheck` configuration files exist in the repo.
 
 ### Naming Conventions
 
 | Type          | Convention   | Example                  |
-|---------------|---------------|---------------------------|
-| Packages      | lowercase     | `internal/domain/entity`  |
-| Structs       | PascalCase    | `Instance`, `DeployService` |
-| Interfaces    | PascalCase    | `VastaiProvider`          |
-| Variables     | lowerCamel    | `dbPath`, `localPort`     |
-| Functions     | verb+Noun     | `OpenDB`, `SearchOffers`  |
-| Private funcs | CamelCase (Go convention) / lowercase for single char |
-
-Follow `func OpenDB()` or `func SearchOffers(...)` not `func opendb()`.
-
-Enums are capitalized consts: `StatusRunning Status = "running"`, not "RUNNING".
-
-### Types & Structs
-
-- Prefer structs over interfaces when implementation-specific
-- Prefer explicit, readable return values and `error` (no panic in domain logic)
-- Interfaces should be minimal: `InstanceRepository interface { ... }` without methods on domain structs that could leak concerns to Infrastructure. 
-- Private fields acceptable; prefer explicit field names for clarity
+|---------------|--------------|--------------------------|
+| Packages      | lowercase    | `internal/domain/entity` |
+| Structs       | PascalCase   | `Instance`, `DeployService` |
+| Interfaces    | PascalCase   | `VastaiProvider`         |
+| Variables     | lowerCamel   | `dbPath`, `localPort`    |
+| Functions     | verb+Noun    | `OpenDB`, `SearchOffers` |
+| Enums         | Capitalized  | `StatusRunning Status = "running"` |
 
 ### Error Handling
-
-Always wrap errors at boundaries:
-
+Always wrap errors at domain boundaries:
 ```go
 if err := s.vastai.CreateInstance(...); err != nil {
-    return nil, fmt.Errorf("create instance: %w", err) // domain-level wrapping
+    return nil, fmt.Errorf("create instance: %w", err)
 }
 ```
+Never return bare DB or API errors from the domain without wrapping them.
 
-Don't unwrap errors blindly; propagate context. Never return bare DB or API errors from the domain without wrapping them.
+## Configuration & State
 
-### Comments & Documentation
+- **Config file:** `~/.mycodeagent/config.yaml` (YAML format)
+- **Env overrides:** `VASTAI_API_KEY`, `HF_TOKEN`
+- **SQLite DB:** `~/.mycodeagent/mycodeagent.db` (auto-migrated on open)
+- **Default base port:** 8000 (configurable via `base_port` in config.yaml)
 
-- Use inline comments only for *non-obvious* logic (not self-explanatory code)
-- Struct/func doc blocks follow standard Go godoc format with description + params/returns as needed
-- Don't add repetitive `//` lines before each field in type declarations
-- Prefer blank line breaks for readability, not excessive comments
+### Config struct
+```yaml
+vastai_api_key: "your-key"
+hf_token: "your-token"
+base_port: 8000
+```
 
-### Code Quality Checklist
+## Operational Notes
 
-- [ ] No unused imports
-- [ ] All variables initialized before use
-- [ ] Short variable names (`dbPath`) acceptable; verbose only when semantics differ from identifier
-- [ ] Error wrapping consistently at interface boundaries
-- [ ] Constants capitalized; function params and return values follow their respective conventions
-- [ ] Use `go generate` for code generation; never commit generated output without comments
-- [ ] Private methods prefixed with lowerCamelCase; private with lowercase
+- **VLLM image:** `vllm/vllm-openai:v0.19.0` is the current default
+- **HF_TOKEN:** Required for gated models (Llama 3, some Mistral variants). Qwen3/2.5, GLM-E are public.
+- **SSH tunnels:** Forward local ports to remote vLLM port 8000. Each `init` allocates a new local port for concurrency.
+- **Volume mount:** vLLM models cache in `/root/.cache/huggingface/`; LM Studio GGUF models cache in `/root/.lmstudio/models/`
+- **SSH/tunnel operations:** Shell out to `ssh` and manage lifecycle via process PID + TCP/HTTP checks
+- **Context usage:** Always pass a real `context.Context` (typically `context.WithTimeout` or `context.WithCancel`), never `&context.Context{}`
+- **Model context window:** Qwen3-32B-AWQ is ~32K tokens
 
-## Cursor Rules (`.cursor/rules/`)
+## Database Schema
 
-Use these custom rules:
-- Repository interfaces live in domain layer; implementations belong in infrastructure package
-- Domain entities should avoid infrastructure dependencies; `time` is allowed for timestamps
-- VLLM image (`vllm/vllm-openai:v0.19.0`) is the current default; update only if necessary
-- HF_TOKEN applies to gated models (Llama 3, some Mistral variants); Qwen3/2.5, GLM-E are public
-- SSH tunnels forward local ports to remote vLLM port 8000; each `init` allocates a new local port for concurrency
-- State is persisted in SQLite at ~/.mycodeagent/mycodeagent.db
+Auto-migrated tables in SQLite:
+- `instances` - deployed instances with tunnel PID, local port, status
+- `volumes` - persistent volumes for model caching
+- `bad_hosts` - blacklisted machine IDs to avoid during offer selection
 
-## Copilot Instructions (`.github/copilot-instructions.md`)
+## Key Files
 
-See `.github/copilot-instructions.md` for detailed Copilot setup instructions specific to this repository.
+- **Entry point:** `cmd/mycodeagent/main.go`
+- **Application layer:** `internal/application/app.go`
+- **Domain services:** `internal/domain/service/`
+- **Domain entities:** `internal/domain/entity/`
+- **Repository interfaces:** `internal/domain/repository/`
+- **Repository implementations:** `internal/infrastructure/persistence/`
+- **vast.ai client:** `internal/infrastructure/vastai/client.go`
+- **SSH tunnel:** `internal/infrastructure/ssh/tunnel.go`
+- **Engines:** `internal/infrastructure/engine/` (vllm.go, lmstudio.go, llamacpp.go)
+- **Config loading:** `internal/infrastructure/config/config.go`
 
-## Additional Notes
+## Commands
 
-- Model context window for Qwen3-32B-AWQ is ~32K tokens (check [Qwen docs](https://modelscope.cn/models/Qwen3-32B-AWQ/summary) for exact value)
-
-- Base deployment port defaults to 8000; configurable via env or config file
-- vLLM models cache in `/root/.cache/huggingface/`; LM Studio GGUF models cache in `/root/.lmstudio/models/`
-- SSH/tunnel operations shell out to `ssh` and manage lifecycle via process PID + TCP/HTTP checks
-- Always pass a real `context.Context` (typically `context.WithTimeout` or `context.WithCancel`), never `&context.Context{}`
+All CLI commands live in `cmd/mycodeagent/commands/` and are wired in `main.go`:
+- `login` - configure API keys
+- `models` - list model catalog with pricing
+- `init` - deploy and tunnel
+- `ps` - list/sync instances
+- `stop` - stop instance
+- `kill` - destroy all instances
+- `budget` - spending breakdown
+- `tunnel` - re-establish SSH tunnel
+- `log` - fetch bootstrap logs
+- `info` - runtime info
+- `config` - write opencode config
+- `restart` - restart model server
+- `volume` - volume CRUD
+- `hosts` - bad host management

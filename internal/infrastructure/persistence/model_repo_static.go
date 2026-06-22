@@ -10,25 +10,32 @@ import (
 
 var defaultModels = []*entity.Model{
 	{
-		Name:             "qwen3-14b-gguf",
+		Name:             "qwen3-8b-awq",
 		Alias:            "coder-mini",
-		HFRepo:           "unsloth/Qwen3-14B-GGUF",
+		HFRepo:           "Qwen/Qwen3-8B-AWQ",
 		Category:         entity.CategoryCoding,
 		VRAM:             16,
 		NumGPUs:          1,
 		StartupTimeout:   10 * time.Minute,
 		ContextLength:    131072,
 		MaxContextLength: 131072,
-		Engine:           entity.EngineLlamaCpp,
-		GGUFFile:         "Qwen3-14B-UD-Q4_K_XL.gguf",
-		LlamaCppArgs: []string{
-			// Q4 KV keeps 131k fitting on 16 GB alongside 9 GB weights.
-			"-ctk", "q4_0",
-			"-ctv", "q4_0",
-			// Qwen3-14B is native 32k; YaRN extends to 128k per the model card.
-			"--rope-scaling", "yarn",
-			"--rope-scale", "4",
-			"--yarn-orig-ctx", "32768",
+		Engine:           entity.EngineVLLM,
+		VLLMArgs: []string{
+			// Auto-detect upgrades AWQ → awq_marlin on Ampere+ — don't force --quantization.
+			"--dtype", "half",
+			"--gpu-memory-utilization", "0.90",
+			// fp8 KV halves cache memory: 5 GB weights + ~4.7 GB KV @131k fits in 16 GB.
+			"--kv-cache-dtype", "fp8",
+			"--max-num-seqs", "8",
+			// Qwen3-8B is native 32k; YaRN factor=4 extends to 131k per the model card.
+			// Single-quoted so bash doesn't brace-expand the JSON when the onstart
+			// script is written via `echo '...'`.
+			"--rope-scaling", `'{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}'`,
+			"--enable-prefix-caching",
+			"--enable-auto-tool-choice",
+			"--tool-call-parser", "hermes",
+			"--reasoning-parser", "qwen3",
+			"--trust-remote-code",
 		},
 		Reasoning:   true, // hybrid: thinking on by default, /no_think disables
 		Vision:      false,
