@@ -103,6 +103,17 @@ mycodeagent config          # writes the provider block + sets the default model
 `n_ctx`) rather than trusting the static catalog, so the context limit written into
 opencode always matches what the GPU can really take.
 
+**What it owns.** Only `provider` keys prefixed `mycodeagent-`. Those are rewritten
+on every run — added for live instances, removed for dead ones. Everything else in
+`opencode.jsonc` is yours: other providers, `mcp`, `lsp`, `permission`, `instructions`
+and `agent`/`mode` are never touched. The global `model` is claimed only when it is
+unset or already points at one of our providers, so a subscription default like
+`opencode-go/kimi-k2.6` survives a deploy.
+
+One caveat: the rewrite goes through `encoding/json`, so the file must be strict
+JSON despite the `.jsonc` name — `//` comments make the command stop with an error
+rather than silently eat them.
+
 ## Architecture
 
 DDD / Clean Architecture, dependencies pointing inward:

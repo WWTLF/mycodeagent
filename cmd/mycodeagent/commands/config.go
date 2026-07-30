@@ -12,6 +12,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// providerPrefix namespaces the provider keys this command owns. Everything
+// under it is rewritten on each run; everything outside it is the user's and is
+// never touched — that boundary is the whole contract of this command.
+const providerPrefix = "mycodeagent-"
+
 func NewConfigCmd(app *application.App) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
@@ -30,9 +35,12 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				}
 			}
 			instances = runningInstances
-			if len(instances) == 0 {
-				return fmt.Errorf("no running instances with tunnels — deploy first with 'mycodeagent init'")
-			}
+			// NOTE: no early return when the list is empty. Bailing out here used
+			// to skip the stale-provider cleanup below, so killing an instance and
+			// running `config` left a dead `mycodeagent-*` provider pointing at a
+			// localhost port nothing listens on — and that port gets handed to the
+			// next deploy, so the stale entry then advertises a model the new
+			// server doesn't serve.
 
 			home, err := os.UserHomeDir()
 			if err != nil {
@@ -49,7 +57,11 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 			data, err := os.ReadFile(configPath)
 			if err == nil {
 				if err := json.Unmarshal(data, &cfg); err != nil {
-					return fmt.Errorf("parse existing %s: %w", configPath, err)
+					// The .jsonc extension invites comments, but this rewrite goes
+					// through encoding/json, which cannot read or preserve them.
+					return fmt.Errorf("parse existing %s: %w\n"+
+						"mycodeagent config rewrites this file as strict JSON — remove any // comments first "+
+						"(they would be lost on the rewrite anyway)", configPath, err)
 				}
 			}
 
@@ -61,10 +73,13 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				providers = make(map[string]any)
 			}
 
-			// Remove old mycodeagent providers
+			// Remove providers from previous runs. This is the only part of the
+			// file we own; everything else the user configured is left alone.
+			removed := 0
 			for k := range providers {
-				if strings.HasPrefix(k, "mycodeagent") {
+				if strings.HasPrefix(k, providerPrefix) {
 					delete(providers, k)
+					removed++
 				}
 			}
 
@@ -111,10 +126,10 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				// Include the model alias when available so the provider key
 				// is human-readable (e.g. mycodeagent-coder-23) instead of
 				// just the instance ID.
-				providerName := fmt.Sprintf("mycodeagent-%d", inst.ID)
+				providerName := fmt.Sprintf("%s%d", providerPrefix, inst.ID)
 				displayName := fmt.Sprintf("mycodeagent %s", inst.ModelName)
 				if alias != "" {
-					providerName = fmt.Sprintf("mycodeagent-%s-%d", alias, inst.ID)
+					providerName = fmt.Sprintf("%s%s-%d", providerPrefix, alias, inst.ID)
 					displayName = fmt.Sprintf("mycodeagent %s (%s)", alias, inst.ModelName)
 				}
 				providers[providerName] = map[string]any{
@@ -137,24 +152,22 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 
 			cfg["provider"] = providers
 
-			// Preserve the user's chosen default if it still points to a running
-			// provider; only fall back to the first instance when there's no
-			// existing default or the existing one no longer exists.
 			existingDefault, _ := cfg["model"].(string)
-			if existingDefault != "" {
-				providerKey, _, _ := strings.Cut(existingDefault, "/")
-				if _, ok := providers[providerKey]; ok {
-					defaultModel = existingDefault
-				}
+			if chosen, keep := chooseDefaultModel(existingDefault, defaultModel, providers); keep {
+				cfg["model"] = chosen
+			} else {
+				// The default pointed at a mycodeagent provider we just removed and
+				// there is no replacement. Leaving it would dangle, so drop the key
+				// and let opencode fall back — loudly, since it is the user's setting.
+				delete(cfg, "model")
+				fmt.Printf("Cleared default model %q — its instance is gone. Set a new one in opencode.\n", existingDefault)
 			}
-			cfg["model"] = defaultModel
 
-			// Set mode temperatures (Qwen3 thinking requires 0.6, greedy decoding breaks thinking)
-			cfg["mode"] = map[string]any{
-				"build":   map[string]any{"temperature": 0.6},
-				"plan":    map[string]any{"temperature": 0.6},
-				"analyze": map[string]any{"temperature": 0.6},
-			}
+			// `mode` is deliberately NOT written. It is deprecated in opencode
+			// (superseded by `agent`), it is a *global* setting, and rewriting it
+			// wholesale clobbered whatever the user had — including per-mode model
+			// overrides. The sampling temperature these models want belongs on the
+			// model entry instead, where it only affects our own providers.
 
 			out, err := json.MarshalIndent(cfg, "", "  ")
 			if err != nil {
@@ -166,7 +179,16 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 			}
 
 			fmt.Printf("Updated %s\n", configPath)
-			fmt.Printf("Default model: %s\n", defaultModel)
+			if removed > 0 && len(instances) == 0 {
+				fmt.Printf("Removed %d stale mycodeagent provider(s); nothing is running.\n", removed)
+				fmt.Println("Deploy one with 'mycodeagent init <model>'.")
+				return nil
+			}
+			if len(instances) == 0 {
+				fmt.Println("No running instances — deploy one with 'mycodeagent init <model>'.")
+				return nil
+			}
+			fmt.Printf("Default model: %s\n", cfg["model"])
 			return nil
 		},
 	}
@@ -174,9 +196,46 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 	return cmd
 }
 
+// chooseDefaultModel decides what opencode's global `model` key should become.
+//
+// existing is what the config already has ("" if unset), candidate is the first
+// running mycodeagent model ("" if none), and providers is the freshly rebuilt
+// provider map. A false second return means "delete the key".
+//
+// The rule that matters: `model` belongs to the user. We may claim it only when
+// nothing is set, or when it already points at one of our own providers.
+//
+// The previous rule — keep the existing default if its provider key is present
+// in the config's `provider` map — looked equivalent but was not. That map only
+// ever holds providers declared *in the file*, while the providers a user
+// actually subscribes to (opencode-go, openrouter, …) are known to opencode
+// natively and never appear there. So `opencode-go/kimi-k2.6` failed the lookup
+// and was silently overwritten with a local model on every single run.
+func chooseDefaultModel(existing, candidate string, providers map[string]any) (string, bool) {
+	if existing == "" {
+		return candidate, candidate != ""
+	}
+	key, _, _ := strings.Cut(existing, "/")
+	if !strings.HasPrefix(key, providerPrefix) {
+		return existing, true // someone else's provider — hands off
+	}
+	if _, stillRunning := providers[key]; stillRunning {
+		return existing, true // ours, and still up
+	}
+	// Ours but gone: replace it if we have something, otherwise clear it.
+	return candidate, candidate != ""
+}
+
+// buildModelConfig renders one entry of a provider's `models` map.
+//
+// The temperature lives here rather than in a global `mode` block: every catalog
+// model is a reasoning model, and greedy decoding degrades Qwen3 thinking, but
+// that is a fact about *these* models — forcing it globally also re-tuned the
+// user's subscription models, which is not ours to do.
 func buildModelConfig(hfRepo string, maxModelLen int) map[string]any {
 	m := map[string]any{
-		"name": hfRepo,
+		"name":    hfRepo,
+		"options": map[string]any{"temperature": 0.6},
 	}
 	if maxModelLen > 0 {
 		m["limit"] = map[string]any{
