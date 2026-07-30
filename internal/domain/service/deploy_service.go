@@ -325,7 +325,9 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, countries 
 			numGPUs, model.VRAM, countryNote(countries))
 	}
 	offer := offers[0] // cheapest (already sorted)
-	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
+	// GPUMemory is MB; printing it as GB produced "49140GB each" on every deploy.
+	fmt.Printf("Selected: %dx %s (%.0f GB each) at $%.3f/hr\n",
+		offer.NumGPUs, offer.GPUName, offer.GPUMemory/1024, offer.DPHTotal)
 
 	contextLength := scaledContextLength(model, offer.GPUMemory)
 	if contextLength > 0 && contextLength != model.ContextLength {
@@ -543,12 +545,29 @@ const (
 	bytesPerMB = 1e6
 )
 
+// lastLine returns the final non-empty line of remote output.
+//
+// Every ssh invocation goes through CombinedOutput, so stderr rides along — and
+// vast.ai prints a two-line login banner ("Welcome to vast.ai…", "Have fun!") on
+// every connection. Parsing the whole blob as a number therefore always failed,
+// and the reporter silently printed nothing at all for a full download. The
+// liveness probe never noticed because it only greps for a substring.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return l
+		}
+	}
+	return ""
+}
+
 // report parses one sample and prints progress when it has moved.
 func (r *downloadReporter) report(out []byte) {
 	if r.done {
 		return
 	}
-	got, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	got, err := strconv.ParseInt(lastLine(string(out)), 10, 64)
 	if err != nil || got <= 0 {
 		return
 	}
@@ -631,7 +650,9 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 			numGPUs, model.VRAM, countryNote(countries))
 	}
 	offer := offers[0]
-	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
+	// GPUMemory is MB; printing it as GB produced "49140GB each" on every deploy.
+	fmt.Printf("Selected: %dx %s (%.0f GB each) at $%.3f/hr\n",
+		offer.NumGPUs, offer.GPUName, offer.GPUMemory/1024, offer.DPHTotal)
 
 	contextLength := scaledContextLength(model, offer.GPUMemory)
 	onstart := s.engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)

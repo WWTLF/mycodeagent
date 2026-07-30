@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/WWTLF/mycodeagent/cmd/mycodeagent/commands"
@@ -18,6 +19,24 @@ import (
 	"github.com/WWTLF/mycodeagent/internal/infrastructure/vastai"
 	"github.com/spf13/cobra"
 )
+
+// version is stamped at build time via -ldflags "-X main.version=...". The
+// fallback matters for `go install`, which builds without the Makefile: Go fills
+// the module version into debug.BuildInfo, so a user who installed v1.2.3 sees
+// that rather than a bare "dev".
+var version = ""
+
+// resolveVersion prefers the ldflags stamp, then the module version recorded by
+// `go install`, then a placeholder.
+func resolveVersion() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
 
 func main() {
 	// Ctrl-C must cancel the command's context rather than kill the process:
@@ -67,6 +86,7 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:           "mycodeagent",
 		Short:         "Deploy and manage llama.cpp models on vast.ai",
+		Version:       resolveVersion(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {

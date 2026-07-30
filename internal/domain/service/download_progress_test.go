@@ -122,3 +122,24 @@ func TestDownloadReporterIgnoresUnusableSamples(t *testing.T) {
 		}
 	}
 }
+
+// Every ssh call goes through CombinedOutput, so stderr rides along — and vast.ai
+// prints a two-line login banner on every connection. The first implementation
+// parsed the whole blob as a number, so it failed on every single sample and the
+// reporter printed nothing for an entire 21 GB download. The unit tests missed it
+// because they fed clean numbers; this one feeds what the wire actually carries.
+func TestDownloadReporterParsesOutputCarryingTheSSHBanner(t *testing.T) {
+	const banner = "Welcome to vast.ai. If authentication fails, try again after a few seconds, and double check your ssh key.\nHave fun!\n"
+
+	r := newDownloadReporter(&entity.Model{DownloadGB: 21.2})
+	r.report([]byte(banner + "1000000000\n"))
+	r.lastAt = time.Now().Add(-10 * time.Second)
+
+	out := captureStdout(t, func() { r.report([]byte(banner + "7000000000\n")) })
+	if !strings.Contains(out, "7.0 / 21.2 GB") {
+		t.Errorf("banner defeated the parse; got %q", out)
+	}
+	if !strings.Contains(out, "33%") {
+		t.Errorf("expected 33%%, got %q", out)
+	}
+}
