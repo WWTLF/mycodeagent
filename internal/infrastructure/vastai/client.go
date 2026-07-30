@@ -129,13 +129,15 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]Offe
 	// cuda_vers >= 12.8 filters by the CUDA *toolkit* installed on the host, but that's
 	// not enough — what actually matters for forward compatibility is the *driver* cap.
 	// cuda_max_good is the maximum CUDA runtime version the host driver can run; if the
-	// vllm-openai image's runtime CUDA exceeds this, workers crash at torch._C._cuda_init
-	// with "Error 804: forward compatibility was attempted on non supported HW" because
-	// consumer GPUs (RTX 30xx/40xx) don't implement CUDA forward compat — only datacenter
-	// cards do. Filtering on cuda_max_good >= 12.8 weeds out under-driver hosts before
-	// they ever boot a container. We keep cuda_vers as a belt-and-suspenders check.
+	// image's runtime CUDA exceeds this, CUDA init fails with "Error 804: forward
+	// compatibility was attempted on non supported HW" because consumer GPUs
+	// (RTX 30xx/40xx) don't implement CUDA forward compat — only datacenter cards do.
+	// The llama.cpp server-cuda image is built on nvidia/cuda:12.8.1, so 12.8 is
+	// exactly the floor: filtering on cuda_max_good >= 12.8 weeds out under-driver
+	// hosts before they ever boot a container. Bumping the pinned image to a newer
+	// CUDA base means bumping this too. We keep cuda_vers as a belt-and-suspenders check.
 	// disk_space >= minDiskGB ensures the host has enough free disk for our container
-	// rootfs request plus image layers + scratch (the vllm-openai image alone is ~15 GB).
+	// rootfs request plus image layers + scratch (server-cuda unpacks to ~6 GB).
 	// Without this, vast.ai can land us on a near-full host and container creation fails
 	// with `docker_build() error writing dockerfile`, which is not recoverable.
 	minRAMMB := minGPURAM * 1024 * 90 / 100

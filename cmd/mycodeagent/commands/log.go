@@ -14,7 +14,7 @@ func NewLogCmd(app *application.App) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "log <id>",
-		Short: "Fetch vLLM logs from a running instance",
+		Short: "Fetch the vast.ai bootstrap log from a running instance",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()

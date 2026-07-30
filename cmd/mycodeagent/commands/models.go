@@ -45,8 +45,8 @@ func NewModelsCmd(app *application.App) *cobra.Command {
 				}
 			}
 
-			fmt.Fprintln(w, "ALIAS\tNAME\tGPUs\tCTX\tR\tV\tT\t$/HR\tHF REPO")
-			fmt.Fprintln(w, "-----\t----\t----\t---\t-\t-\t-\t----\t-------")
+			fmt.Fprintln(w, "ALIAS\tNAME\tGPUs\tCTX\tR\tV\tT\t$/HR\tGGUF REPO\tQUANT")
+			fmt.Fprintln(w, "-----\t----\t----\t---\t-\t-\t-\t----\t---------\t-----")
 			for _, m := range models {
 				numGPUs := m.NumGPUs
 				if numGPUs <= 0 {
@@ -61,7 +61,11 @@ func NewModelsCmd(app *application.App) *cobra.Command {
 				if p, ok := prices[m.Name]; ok {
 					priceStr = fmt.Sprintf("$%.3f", p)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.Alias, m.Name, gpuStr, ctxStr, rStr, vStr, tStr, priceStr, m.HFRepo)
+				quantStr := m.Quant
+				if quantStr == "" {
+					quantStr = "Q4_K_M" // llama.cpp's default when -hf carries no tag
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.Alias, m.Name, gpuStr, ctxStr, rStr, vStr, tStr, priceStr, m.HFRepo, quantStr)
 			}
 			return w.Flush()
 		},

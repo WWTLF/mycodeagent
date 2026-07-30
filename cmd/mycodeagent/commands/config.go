@@ -86,10 +86,10 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				}
 
 				// Authoritative model ID AND context length: ask the server directly.
-				// vLLM reports the HF repo (matching the static entry), but LM Studio
-				// reports the lowercased GGUF filename — if we use the static HFRepo
-				// for LM Studio instances, opencode sends model=... and gets "model
-				// not found". Always prefer what the server actually answers to.
+				// llama-server reports whatever --alias was launched with (the engine
+				// sets it to Model.Name), not the GGUF repo path — if we wrote the
+				// static HFRepo into the config, opencode would send model=<repo> and
+				// get "model not found". Always prefer what the server answers.
 				//
 				// The served context length is also authoritative: scaledContextLength()
 				// grows model.ContextLength linearly with per-GPU VRAM headroom, so a

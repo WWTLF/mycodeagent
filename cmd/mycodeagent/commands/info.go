@@ -113,7 +113,7 @@ func printExampleConfig(baseURL, hfRepo string) {
   "provider": {
     "mycodeagent": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "mycodeagent vLLM",
+      "name": "mycodeagent llama.cpp",
       "options": {
         "baseURL": "%s"
       },

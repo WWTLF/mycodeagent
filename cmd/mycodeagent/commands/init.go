@@ -38,7 +38,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 				fmt.Println("Run model server on the instance:")
 				fmt.Printf("  %s\n", result.ServeCommand)
 				fmt.Println()
-				fmt.Println("Set up SSH tunnel to vLLM (port 8000):")
+				fmt.Println("Set up SSH tunnel to llama-server (port 8000):")
 				fmt.Printf("  ssh -p %d root@%s -L 8080:localhost:8000\n", inst.SSHPort, inst.SSHHost)
 				fmt.Println()
 				fmt.Println("Once the tunnel is up, the API will be at: http://localhost:8080/v1")
@@ -50,7 +50,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&createOnly, "create-instance-only", false, "Create instance and show SSH details without setting up tunnel or waiting for vLLM")
+	cmd.Flags().BoolVar(&createOnly, "create-instance-only", false, "Create instance and show SSH details without setting up tunnel or waiting for the model server")
 
 	return cmd
 }

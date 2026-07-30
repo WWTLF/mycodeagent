@@ -91,8 +91,11 @@ func WaitForSSH(ctx context.Context, host string, port int) error {
 	}
 }
 
-// WaitForVLLMHealth waits until the model server responds via the local tunnel, respecting context deadline.
-func WaitForVLLMHealth(ctx context.Context, localPort int) error {
+// WaitForServerHealth waits until the model server responds via the local tunnel,
+// respecting the context deadline. llama-server binds the port early and answers
+// 503 on every route except /health until the model is fully loaded, so a 200 on
+// /v1/models means "weights loaded and serving", not just "process up".
+func WaitForServerHealth(ctx context.Context, localPort int) error {
 	url := fmt.Sprintf("http://localhost:%d/v1/models", localPort)
 	client := &http.Client{Timeout: 5 * time.Second}
 	ticker := time.NewTicker(10 * time.Second)
@@ -109,7 +112,7 @@ func WaitForVLLMHealth(ctx context.Context, localPort int) error {
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("vLLM not healthy at port %d: %w", localPort, ctx.Err())
+			return fmt.Errorf("model server not healthy at port %d: %w", localPort, ctx.Err())
 		case <-ticker.C:
 		}
 	}

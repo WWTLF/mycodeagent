@@ -21,6 +21,6 @@ type Instance struct {
 	SSHPort    int
 	TunnelPID  int
 	HourlyRate float64
-	NumGPUs    int // actual GPU count from the offer; needed for restart so vLLM keeps the same --tensor-parallel-size
+	NumGPUs    int // actual GPU count from the offer; needed for restart so the server is relaunched with the same GPU split
 	CreatedAt  time.Time
 }

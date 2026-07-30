@@ -8,163 +8,209 @@ import (
 	"github.com/WWTLF/mycodeagent/internal/domain/repository"
 )
 
-// All models run on vLLM (the only engine). Every HFRepo below was verified to
-// exist on HuggingFace and to be a vLLM-servable quant (AWQ or FP8) — not GGUF.
-// Contexts are kept conservative to guarantee the server boots; scaledContextLength
-// grows ContextLength toward MaxContextLength when a fatter GPU is rented.
+// All models run on llama.cpp (the only engine), so every entry points at a GGUF
+// repository plus a quant tag. Repos, quant tags and file sizes below were verified
+// against the HuggingFace API, and every chat template was checked to actually
+// declare thinking and tool support before Reasoning/ToolCalling were set here.
 //
-// FP8 note: the FP8 checkpoints run on Ampere (RTX 3090) via vLLM's fp8-marlin
-// W8A16 path; native FP8 compute needs Ada/Hopper (RTX 4090/L40/H100), where
-// they're faster. Either way they load on the compute_cap>=8.0 hosts we filter for.
+// The catalog spans four VRAM tiers — 16 / 24 / 32 / 48 GB — and is optimised for
+// CAPABILITY first, with speed only required to stay usable for interactive coding.
+// That is why the working tiers are DENSE models: a 27B dense uses all 27B
+// parameters per token, whereas a 35B-A3B MoE activates only 3B and behaves closer
+// to a ~10B model. The MoE is far faster (roughly 60-100 vs 20-30 tok/s) but not as
+// strong, so it is kept as one explicit `coder-fast` entry rather than the default.
+//
+// Sizing, per GPU:
+//
+//	weights + KV(ctx) + ~1.5 GB compute buffers  <  usable VRAM
+//
+// Usable VRAM is below nameplate (a "24 GB" 3090 reports ~23.4), and KV per token at
+// q8_0 is 2 * n_layers * n_kv_heads * head_dim * ~1.06 bytes:
+//
+//	Qwen3.5-9B       dense  L=32 kv=4  hd=256  ->   68 KB/token
+//	Qwen3.6-27B      dense  L=64 kv=4  hd=256  ->  136 KB/token
+//	Qwen3.6-35B-A3B  MoE    L=40 kv=2  hd=256  ->   42 KB/token
+//
+// The dense 27B pays for its capability in context: 136 KB/token is 3.2x the MoE, so
+// the same card holds far less window. That trade is deliberate. See docs/Solution.md.
+//
+// Quant tags must be UNIQUE substrings of a filename in the repo. "Q6_K" is NOT —
+// it also matches "UD-Q6_K_XL" — so the 48 GB tier names the XL tag explicitly.
+// Check any new tag against the repo file list before adding it.
+//
+// --no-mmproj: several of these repos ship a ~0.9 GB vision projector that `-hf`
+// would auto-download and offload to VRAM. Everything here is served text-only. To
+// enable vision, drop the flag and set Vision: true.
+//
+// No YaRN anywhere: Qwen3.5 and Qwen3.6 are natively 262144 context.
 var defaultModels = []*entity.Model{
 	{
-		Name:             "qwen3-8b-awq",
+		// 16 GB. Dense 9B is the largest dense model that fits with real context;
+		// a 27B at the 2-bit quant it would need here is worse than a 9B at Q5.
+		Name:             "qwen35-9b",
 		Alias:            "coder-mini",
-		HFRepo:           "Qwen/Qwen3-8B-AWQ",
+		HFRepo:           "unsloth/Qwen3.5-9B-GGUF",
+		Quant:            "UD-Q5_K_XL", // 6.7 GB
 		Category:         entity.CategoryCoding,
 		VRAM:             16,
 		NumGPUs:          1,
-		DiskGB:           30, // ~6 GB AWQ weights + scratch
-		StartupTimeout:   10 * time.Minute,
-		ContextLength:    131072,
-		MaxContextLength: 131072,
-		VLLMArgs: []string{
-			// Auto-detect upgrades AWQ → awq_marlin on Ampere+ — don't force --quantization.
-			"--dtype", "half",
-			"--gpu-memory-utilization", "0.90",
-			// fp8 KV halves cache memory: ~6 GB weights + ~4.7 GB KV @131k fits in 16 GB.
-			"--kv-cache-dtype", "fp8",
-			"--max-num-seqs", "8",
-			// Qwen3-8B is native 32k; YaRN factor=4 extends to 131k per the model card.
-			// Single-quoted so bash doesn't brace-expand the JSON when the onstart
-			// script is written via `echo '...'`.
-			"--rope-scaling", `'{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}'`,
-			"--enable-prefix-caching",
-			"--enable-auto-tool-choice",
-			"--tool-call-parser", "hermes",
-			"--reasoning-parser", "qwen3",
-			"--trust-remote-code",
-		},
-		Reasoning:   true, // hybrid: thinking on by default, /no_think disables
-		Vision:      false,
-		ToolCalling: true,
-	},
-	{
-		Name:             "qwen3-30b-a3b-thinking-fp8",
-		Alias:            "coder",
-		HFRepo:           "Qwen/Qwen3-30B-A3B-Thinking-2507-FP8",
-		Category:         entity.CategoryCoding,
-		VRAM:             24,
-		NumGPUs:          2, // ~30 GB FP8 weights need 2x24 GB with expert-parallel
-		DiskGB:           60,
-		StartupTimeout:   20 * time.Minute,
-		ContextLength:    131072,
-		MaxContextLength: 262144, // native 262k — no YaRN needed
-		VLLMArgs: []string{
-			"--gpu-memory-utilization", "0.90",
-			// MoE: shard experts across both ranks instead of replicating (fits 30 GB on 2x24).
-			"--enable-expert-parallel",
-			// fp8 KV keeps 131k+ in the remaining headroom.
-			"--kv-cache-dtype", "fp8",
-			"--enable-prefix-caching",
-			"--enable-auto-tool-choice",
-			"--tool-call-parser", "qwen3_xml",
-			"--reasoning-parser", "qwen3",
-			"--trust-remote-code",
-		},
-		Reasoning:   true, // dedicated thinking model
-		Vision:      false,
-		ToolCalling: true,
-	},
-	{
-		Name:             "qwen3-coder-30b-a3b-fp8",
-		Alias:            "coder-hq",
-		HFRepo:           "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
-		Category:         entity.CategoryCoding,
-		VRAM:             24,
-		NumGPUs:          2,
-		DiskGB:           60,
-		StartupTimeout:   20 * time.Minute,
-		ContextLength:    131072,
+		DiskGB:           20,
+		StartupTimeout:   8 * time.Minute,
+		ContextLength:    65536, // 6.7 + 4.5 KV + 1.5 = 12.7 of ~15.4
 		MaxContextLength: 262144,
-		VLLMArgs: []string{
-			"--gpu-memory-utilization", "0.90",
-			"--enable-expert-parallel",
-			"--kv-cache-dtype", "fp8",
-			"--enable-prefix-caching",
-			"--enable-auto-tool-choice",
-			"--tool-call-parser", "qwen3_xml",
-			"--trust-remote-code",
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
 		},
-		Reasoning:   false, // Qwen3-Coder instruct is non-thinking
+		Reasoning:   true,
 		Vision:      false,
 		ToolCalling: true,
 	},
 	{
-		Name:             "qwen25-32b-instruct-awq",
-		Alias:            "writer",
-		HFRepo:           "Qwen/Qwen2.5-32B-Instruct-AWQ",
+		// 24 GB. The capability default for this tier: full 27B active per token.
+		// Context is the price — 136 KB/token caps it at 32k here.
+		Name:             "qwen36-27b-24g",
+		Alias:            "coder",
+		HFRepo:           "unsloth/Qwen3.6-27B-GGUF",
+		Quant:            "IQ4_XS", // 15.4 GB
 		Category:         entity.CategoryCoding,
 		VRAM:             24,
-		NumGPUs:          2, // ~20 GB AWQ weights; 2x24 leaves room for long-form KV
-		DiskGB:           45,
-		StartupTimeout:   15 * time.Minute,
-		ContextLength:    32768,  // native 32k
-		MaxContextLength: 131072, // YaRN extends to 128k
-		VLLMArgs: []string{
-			"--dtype", "half", // some Ampere AWQ kernels need fp16, not bf16
-			"--gpu-memory-utilization", "0.95",
-			"--enable-prefix-caching",
-			"--enable-auto-tool-choice",
-			"--tool-call-parser", "hermes",
-			// YaRN so scaledContextLength can grow past native 32k on bigger offers.
-			"--rope-scaling", `'{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}'`,
-			"--trust-remote-code",
-		},
-		Reasoning:   false,
-		Vision:      false,
-		ToolCalling: true,
-	},
-	{
-		Name:             "dolphin-29-llama3-8b-awq",
-		Alias:            "rude",
-		HFRepo:           "solidrust/dolphin-2.9-llama3-8b-AWQ",
-		Category:         entity.CategoryCoding,
-		VRAM:             16,
 		NumGPUs:          1,
-		DiskGB:           30,
-		StartupTimeout:   10 * time.Minute,
-		ContextLength:    8192, // Llama-3-8B native 8k
-		MaxContextLength: 8192,
-		VLLMArgs: []string{
-			"--dtype", "half",
-			"--gpu-memory-utilization", "0.90",
-			"--enable-prefix-caching",
-			"--trust-remote-code",
+		DiskGB:           28,
+		StartupTimeout:   12 * time.Minute,
+		ContextLength:    32768, // 15.4 + 4.5 KV + 1.5 = 21.4 of ~23.4
+		MaxContextLength: 262144,
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
 		},
-		Reasoning:   false,
+		Reasoning:   true,
 		Vision:      false,
-		ToolCalling: false,
+		ToolCalling: true,
 	},
 	{
-		Name:             "qwen3-30b-a3b-abliterated-fp8",
-		Alias:            "rude-pro",
-		HFRepo:           "hotpizzatactics/Qwen3-30B-A3B-abliterated-FP8-dynamic",
+		// 24 GB, speed-first alternative. Same card as `coder`, but 3B active
+		// instead of 27B: ~3x the tokens/s and 2x the context, at roughly the
+		// capability of a 10B dense model. For iterating over large repos.
+		Name:             "qwen36-35b-a3b",
+		Alias:            "coder-fast",
+		HFRepo:           "unsloth/Qwen3.6-35B-A3B-GGUF",
+		Quant:            "UD-IQ4_XS", // 17.7 GB
 		Category:         entity.CategoryCoding,
 		VRAM:             24,
-		NumGPUs:          2,
-		DiskGB:           60,
-		StartupTimeout:   20 * time.Minute,
-		ContextLength:    32768, // conservative: community quant, keep boot guaranteed
-		MaxContextLength: 32768,
-		VLLMArgs: []string{
-			"--gpu-memory-utilization", "0.90",
-			"--enable-expert-parallel",
-			"--enable-prefix-caching",
-			"--enable-auto-tool-choice",
-			"--tool-call-parser", "qwen3_xml",
-			"--reasoning-parser", "qwen3",
-			"--trust-remote-code",
+		NumGPUs:          1,
+		DiskGB:           32,
+		StartupTimeout:   12 * time.Minute,
+		ContextLength:    65536, // 17.7 + 2.8 KV + 1.5 = 22.0 of ~23.4
+		MaxContextLength: 262144,
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
+		},
+		Reasoning:   true,
+		Vision:      false,
+		ToolCalling: true,
+	},
+	{
+		// 32 GB. Same 27B, a full quant step up (IQ4_XS -> Q5_K_M) and double the
+		// context. Q5_K_M is chosen over Q6_K because "Q6_K" is an ambiguous tag.
+		Name:             "qwen36-27b-32g",
+		Alias:            "coder-hq",
+		HFRepo:           "unsloth/Qwen3.6-27B-GGUF",
+		Quant:            "Q5_K_M", // 19.5 GB
+		Category:         entity.CategoryCoding,
+		VRAM:             32,
+		NumGPUs:          1,
+		DiskGB:           32,
+		StartupTimeout:   12 * time.Minute,
+		ContextLength:    65536, // 19.5 + 8.9 KV + 1.5 = 29.9 of ~31.4
+		MaxContextLength: 262144,
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
+		},
+		Reasoning:   true,
+		Vision:      false,
+		ToolCalling: true,
+	},
+	{
+		// 48 GB flagship. ~6.5 bpw is effectively lossless, so this is the 27B at
+		// full strength with a 128k window. Passed over here: Qwen3.5-122B-A10B at
+		// UD-IQ2_M (39.1 GB, ~35B-equivalent) — bigger on paper, but 2-bit
+		// degradation is real and it is a generation behind Qwen3.6.
+		Name:             "qwen36-27b-48g",
+		Alias:            "coder-max",
+		HFRepo:           "unsloth/Qwen3.6-27B-GGUF",
+		Quant:            "UD-Q6_K_XL", // 25.6 GB
+		Category:         entity.CategoryCoding,
+		VRAM:             48,
+		NumGPUs:          1,
+		DiskGB:           38,
+		StartupTimeout:   15 * time.Minute,
+		ContextLength:    131072, // 25.6 + 17.8 KV + 1.5 = 44.9 of ~47.4
+		MaxContextLength: 262144,
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
+		},
+		Reasoning:   true,
+		Vision:      false,
+		ToolCalling: true,
+	},
+	{
+		// 32 GB uncensored. Abliterated Qwen3.6-35B-A3B — MoE, so the light KV buys
+		// a 128k window here. NOTE: Reasoning/ToolCalling are inherited from the base
+		// model's template; the abliterated GGUF's own template was not verified.
+		Name:             "qwen36-35b-a3b-abliterated",
+		Alias:            "rude",
+		HFRepo:           "mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF",
+		Quant:            "Q4_K_M", // 21.2 GB (matches the i1-Q4_K_M file)
+		Category:         entity.CategoryCoding,
+		VRAM:             32,
+		NumGPUs:          1,
+		DiskGB:           34,
+		StartupTimeout:   14 * time.Minute,
+		ContextLength:    131072, // 21.2 + 5.5 KV + 1.5 = 28.2 of ~31.4
+		MaxContextLength: 262144,
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
 		},
 		Reasoning:   true,
 		Vision:      false,

@@ -35,8 +35,8 @@ type VastaiProvider interface {
 }
 
 // EngineProvider abstracts engine-specific deployment details. There is one
-// implementation (vLLM); the interface is kept so the domain layer depends on
-// an abstraction rather than the concrete infrastructure type.
+// implementation (llama.cpp); the interface is kept so the domain layer depends
+// on an abstraction rather than the concrete infrastructure type.
 type EngineProvider interface {
 	// DockerImage returns the Docker image to use on vast.ai
 	DockerImage() string
@@ -48,6 +48,12 @@ type EngineProvider interface {
 	BuildRawCommand(model *entity.Model, numGPUs, contextLength int) string
 	// RestartCommands returns the kill and start commands for restarting the server
 	RestartCommands(model *entity.Model) (killCmd string, startCmd string)
+	// LivenessCommand returns a remote shell command that prints ALIVE or DEAD
+	// depending on whether the model server process is still running. Keeping it
+	// here means the domain never hardcodes a process name or a probing tool.
+	LivenessCommand() string
+	// LogPath returns the remote path the server's stdout/stderr is teed to.
+	LogPath() string
 }
 
 // SSHTunnelProvider abstracts SSH tunnel operations for the domain layer.
@@ -57,7 +63,7 @@ type SSHTunnelProvider interface {
 	WaitForSSH(ctx context.Context, host string, port int) error
 	RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error)
 	FindFreePort(basePort int) (int, error)
-	WaitForVLLMHealth(ctx context.Context, localPort int) error
+	WaitForServerHealth(ctx context.Context, localPort int) error
 }
 
 type OfferResult struct {
@@ -73,8 +79,9 @@ type OfferResult struct {
 const defaultDiskGB = 40
 
 // diskHeadroomGB is added to a model's disk request when filtering host offers:
-// the vllm-openai image is ~15 GB and we want scratch on top of the model download.
-const diskHeadroomGB = 25
+// the llama.cpp server-cuda image is ~2.6 GB compressed / ~6 GB unpacked, and the
+// host needs room for both plus scratch on top of the GGUF download.
+const diskHeadroomGB = 12
 
 type DeployService struct {
 	models    repository.ModelRepository
@@ -195,7 +202,7 @@ func scaledContextLength(model *entity.Model, offerGPUMemoryMB float64) int {
 	return scaled
 }
 
-// Deploy executes the full init flow: find offer → create instance → SSH → vLLM → tunnel.
+// Deploy executes the full init flow: find offer → create instance → SSH → tunnel → health.
 // Instances are disposable: if any step after creation fails, the vast.ai instance
 // is destroyed and the tunnel killed so a failed deploy never leaves a paid GPU running.
 func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *entity.Instance, err error) {
@@ -314,9 +321,9 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *ent
 	healthCh := make(chan error, 1)
 	failCh := make(chan error, 1)
 	go func() {
-		healthCh <- s.ssh.WaitForVLLMHealth(ctx, localPort)
+		healthCh <- s.ssh.WaitForServerHealth(ctx, localPort)
 	}()
-	// Liveness watcher: if the vllm process dies during startup, abort early
+	// Liveness watcher: if the server process dies during startup, abort early
 	// with the tail of its log instead of polling a dead port until timeout.
 	go s.watchServerProcess(ctx, sshHost, sshPort, failCh)
 
@@ -324,7 +331,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *ent
 	case healthErr := <-healthCh:
 		if healthErr != nil {
 			// Model-side failure — do NOT blacklist the host.
-			return nil, fmt.Errorf("vLLM health check: %w", healthErr)
+			return nil, fmt.Errorf("model server health check: %w", healthErr)
 		}
 	case crashErr := <-failCh:
 		return nil, fmt.Errorf("model server crashed during startup: %w", crashErr)
@@ -338,11 +345,12 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *ent
 }
 
 // watchServerProcess polls the remote host over SSH and reports (via failCh)
-// when the vllm process is no longer running, so Deploy can fail fast on a
-// crash instead of waiting out the full startup timeout. It requires two
+// when the model server process is no longer running, so Deploy can fail fast on
+// a crash instead of waiting out the full startup timeout. It requires two
 // consecutive "dead" reads to avoid a false positive during a brief re-exec.
+// The probe command and log path come from the engine, not from this layer.
 func (s *DeployService) watchServerProcess(ctx context.Context, sshHost string, sshPort int, failCh chan<- error) {
-	// Grace period: let the onstart script write itself and launch vllm.
+	// Grace period: let the onstart script write itself and launch the server.
 	select {
 	case <-ctx.Done():
 		return
@@ -352,18 +360,20 @@ func (s *DeployService) watchServerProcess(ctx context.Context, sshHost string, 
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 
+	liveness := s.engine.LivenessCommand()
+	tailCmd := fmt.Sprintf("tail -n 25 %s 2>/dev/null", s.engine.LogPath())
+
 	deadCount := 0
 	for {
-		out, err := s.ssh.RunRemoteCommand(sshHost, sshPort,
-			"pgrep -f 'vllm serve' >/dev/null 2>&1 && echo ALIVE || echo DEAD")
+		out, err := s.ssh.RunRemoteCommand(sshHost, sshPort, liveness)
 		switch {
 		case err != nil:
 			deadCount = 0 // SSH hiccup, not a crash signal
 		case strings.Contains(string(out), "DEAD"):
 			deadCount++
 			if deadCount >= 2 {
-				logTail, _ := s.ssh.RunRemoteCommand(sshHost, sshPort, "tail -n 25 /tmp/vllm.log 2>/dev/null")
-				failCh <- fmt.Errorf("vllm process is no longer running; last log lines:\n%s",
+				logTail, _ := s.ssh.RunRemoteCommand(sshHost, sshPort, tailCmd)
+				failCh <- fmt.Errorf("model server process is no longer running; last log lines:\n%s",
 					strings.TrimSpace(string(logTail)))
 				return
 			}
@@ -396,7 +406,7 @@ type CreateOnlyResult struct {
 }
 
 // DeployCreateOnly creates the instance and waits for it to be running, but does not
-// set up the SSH tunnel or wait for vLLM health. The instance is intentionally left
+// set up the SSH tunnel or wait for server health. The instance is intentionally left
 // running so the user can attach manually — no failure cleanup here.
 func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string) (*CreateOnlyResult, error) {
 	model, err := s.models.FindByName(modelName)

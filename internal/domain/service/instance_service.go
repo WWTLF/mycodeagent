@@ -225,26 +225,6 @@ func (s *InstanceService) GetVastaiLogs(ctx context.Context, instanceID int64, t
 	return s.vastai.GetInstanceLogs(ctx, int(inst.VastaiID), tail)
 }
 
-// TailServerLog SSHes to the instance and tails /root/vllm-server.log. This is
-// the previous GetLogs implementation, kept as a future-API surface. NOTE: the
-// hardcoded path is wrong for our current deploys (vLLM writes to /tmp/vllm.log
-// via tee in the engine BuildOnstart). Fix the path or parameterize before
-// wiring this to a command.
-func (s *InstanceService) TailServerLog(ctx context.Context, instanceID int64) ([]byte, error) {
-	inst, err := s.instances.FindByID(instanceID)
-	if err != nil {
-		return nil, fmt.Errorf("find instance: %w", err)
-	}
-
-	command := "tail -n 100 /root/vllm-server.log 2>/dev/null || echo 'No logs found'"
-	output, err := s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, command)
-	if err != nil {
-		return nil, fmt.Errorf("get logs: %w", err)
-	}
-
-	return output, nil
-}
-
 // ============================================================================
 // Server probe
 // ============================================================================
@@ -378,18 +358,18 @@ func (s *InstanceService) Sync(ctx context.Context) ([]*entity.Instance, error) 
 }
 
 // detectModelFromOnstart matches the onstart script against the static catalog
-// by HFRepo, falling back to a "vllm serve '<repo>'" parse for unknown models.
-// Pure helper, no I/O.
+// by HFRepo, falling back to parsing the "-hf <repo>[:quant]" reference for
+// models that are not (or no longer) in the catalog. Pure helper, no I/O.
 func detectModelFromOnstart(onstart string, models []*entity.Model) string {
 	for _, m := range models {
 		if strings.Contains(onstart, m.HFRepo) {
 			return m.Name
 		}
 	}
-	if idx := strings.Index(onstart, "vllm serve '"); idx >= 0 {
-		rest := onstart[idx+len("vllm serve '"):]
-		if end := strings.Index(rest, "'"); end >= 0 {
-			return rest[:end]
+	if idx := strings.Index(onstart, "-hf "); idx >= 0 {
+		ref := strings.Fields(onstart[idx+len("-hf "):])
+		if len(ref) > 0 {
+			return ref[0]
 		}
 	}
 	return "unknown"

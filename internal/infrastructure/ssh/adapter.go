@@ -39,6 +39,6 @@ func (a *Adapter) FindFreePort(basePort int) (int, error) {
 	return FindFreePort(basePort)
 }
 
-func (a *Adapter) WaitForVLLMHealth(ctx context.Context, localPort int) error {
-	return WaitForVLLMHealth(ctx, localPort)
+func (a *Adapter) WaitForServerHealth(ctx context.Context, localPort int) error {
+	return WaitForServerHealth(ctx, localPort)
 }

@@ -44,7 +44,7 @@ func NewPsCmd(app *application.App) *cobra.Command {
 					health = checkHealth(inst.LocalPort)
 				}
 
-				// Try to detect model via vLLM API if unknown and tunnel is up.
+				// Try to detect model via the served API if unknown and tunnel is up.
 				if inst.ModelName == "unknown" && inst.LocalPort > 0 {
 					if detected, _, _ := app.GetServedModelInfo(ctx, inst.LocalPort); detected != "" {
 						inst.ModelName = detected
@@ -67,11 +67,11 @@ func NewPsCmd(app *application.App) *cobra.Command {
 }
 
 func checkHealth(localPort int) string {
-	// Use /v1/models as a universal OpenAI-compatible probe. vLLM's /health
-	// endpoint works but LM Studio doesn't implement it (it 200s everything
-	// unknown with an error body), so /health alone gives false positives.
-	// /v1/models is implemented correctly by both and returns a "data" array
-	// containing the loaded model(s). Valid shape ⇒ actually serving.
+	// Use /v1/models as a universal OpenAI-compatible probe rather than an
+	// engine-specific /health route, and require a valid "data" array containing
+	// the loaded model(s) — some servers 200 unknown paths with an error body, so
+	// status alone gives false positives. Valid shape ⇒ actually serving.
+	// llama-server answers 503 here until the weights finish loading.
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/v1/models", localPort))
 	if err != nil {

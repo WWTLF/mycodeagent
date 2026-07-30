@@ -31,10 +31,10 @@ func NewTunnelCmd(app *application.App) *cobra.Command {
 
 			// Brief pause for tunnel to stabilize before health probe.
 			time.Sleep(3 * time.Second)
-			fmt.Print("Verifying vLLM... ")
+			fmt.Print("Verifying model server... ")
 			id, maxLen, err := app.GetServedModelInfo(ctx, inst.LocalPort)
 			if err != nil || id == "" {
-				fmt.Println("not responding (vLLM may still be loading)")
+				fmt.Println("not responding (the model may still be loading)")
 				return nil
 			}
 			fmt.Printf("OK — %s (context: %d)\n", id, maxLen)

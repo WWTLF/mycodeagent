@@ -37,11 +37,11 @@ func main() {
 	vastaiAdapter := vastai.NewAdapter(cfg.VastaiAPIKey)
 	sshAdapter := ssh.NewAdapter()
 
-	vllmEngine := engine.NewVLLMEngine()
+	llamaEngine := engine.NewLlamaCppEngine()
 
 	deploySvc := service.NewDeployService(
 		modelRepo, instanceRepo, badHostRepo,
-		vastaiAdapter, sshAdapter, vllmEngine,
+		vastaiAdapter, sshAdapter, llamaEngine,
 		cfg.BasePort, cfg.HFToken,
 	)
 
@@ -55,7 +55,7 @@ func main() {
 
 	rootCmd := &cobra.Command{
 		Use:           "mycodeagent",
-		Short:         "Deploy and manage vLLM models on vast.ai",
+		Short:         "Deploy and manage llama.cpp models on vast.ai",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
