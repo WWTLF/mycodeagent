@@ -90,34 +90,44 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 					continue
 				}
 
-				// Default: HF repo from the static catalog.
-				hfRepo := inst.ModelName
+				// The model id opencode must send back. The engine launches the
+				// server with `--alias model.Name`, and entity.Instance.ModelName is
+				// that same value, so the stored name is already the right fallback.
+				//
+				// It must NOT be replaced with the catalog's HFRepo: that is the GGUF
+				// repository path, which the server has never heard of. Writing it
+				// made opencode send model=unsloth/Qwen3.6-27B-GGUF and get back
+				// "model not found" — the probe below happened to paper over it
+				// whenever the server was already up.
+				modelID := inst.ModelName
 				maxModelLen := 0
 				alias := ""
 				if m, err := app.FindModelByName(inst.ModelName); err == nil {
-					hfRepo = m.HFRepo
 					maxModelLen = m.ContextLength
 					alias = m.Alias
 				}
 
-				// Authoritative model ID AND context length: ask the server directly.
-				// llama-server reports whatever --alias was launched with (the engine
-				// sets it to Model.Name), not the GGUF repo path — if we wrote the
-				// static HFRepo into the config, opencode would send model=<repo> and
-				// get "model not found". Always prefer what the server answers.
+				// Both values are better read from the server than assumed.
 				//
-				// The served context length is also authoritative: scaledContextLength()
+				// The served context length is authoritative: scaledContextLength()
 				// grows model.ContextLength linearly with per-GPU VRAM headroom, so a
 				// rental with fatter GPUs than the catalog minimum will serve a larger
 				// window than the static ContextLength claims. Writing the catalog value
 				// into opencode's limit.context makes opencode refuse prompts that would
 				// actually fit on the server, with the session bricking at compaction
 				// time (pruned=0) and prompt_async failing synchronously with UnknownError.
+				// llama.cpp can also auto-fit the window *down* to fit VRAM, in which
+				// case the catalog value is too large and opencode oversends instead.
 				if served, servedMaxLen, _ := app.GetServedModelInfo(ctx, inst.LocalPort); served != "" {
-					hfRepo = served
+					modelID = served
 					if servedMaxLen > 0 {
 						maxModelLen = servedMaxLen
 					}
+				} else {
+					// Still loading, or the tunnel is down. The entry is written from
+					// catalog values, which may not match what the server ends up with.
+					fmt.Printf("  warning: instance %d did not answer /v1/models — "+
+						"context limit is the catalog value; re-run once it is healthy\n", inst.ID)
 				}
 
 				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
@@ -139,15 +149,15 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 						"baseURL": baseURL,
 					},
 					"models": map[string]any{
-						hfRepo: buildModelConfig(hfRepo, maxModelLen),
+						modelID: buildModelConfig(modelID, maxModelLen),
 					},
 				}
 				// First instance becomes the default
 				if defaultModel == "" {
-					defaultModel = providerName + "/" + hfRepo
+					defaultModel = providerName + "/" + modelID
 				}
 
-				fmt.Printf("  %s: %s → %s\n", providerName, hfRepo, baseURL)
+				fmt.Printf("  %s: %s → %s\n", providerName, modelID, baseURL)
 			}
 
 			cfg["provider"] = providers
@@ -232,9 +242,9 @@ func chooseDefaultModel(existing, candidate string, providers map[string]any) (s
 // model is a reasoning model, and greedy decoding degrades Qwen3 thinking, but
 // that is a fact about *these* models — forcing it globally also re-tuned the
 // user's subscription models, which is not ours to do.
-func buildModelConfig(hfRepo string, maxModelLen int) map[string]any {
+func buildModelConfig(modelID string, maxModelLen int) map[string]any {
 	m := map[string]any{
-		"name":    hfRepo,
+		"name":    modelID,
 		"options": map[string]any{"temperature": 0.6},
 	}
 	if maxModelLen > 0 {
