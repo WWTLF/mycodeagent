@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/domain/entity"
@@ -193,15 +194,28 @@ func (s *DeployService) markHostBad(machineID int, reason string) {
 	fmt.Printf("Recorded machine %d as bad host (%s)\n", machineID, reason)
 }
 
-// Liveness watcher cadence. Variables rather than constants purely so tests can
-// shrink them: the crash path is otherwise unreachable in under two minutes, and
-// it guards the rule that a model-side crash must never blacklist a host.
+// Liveness watcher cadence. Adjustable so tests can shrink it — the crash path
+// is otherwise unreachable in under two minutes, and it guards the rule that a
+// model-side crash must never blacklist a host.
+//
+// Atomics, not plain variables: Deploy cannot join its watcher goroutine (the
+// goroutine only unblocks when the deferred cancel fires, i.e. after Deploy has
+// returned), so a watcher outlives its test and reads these while the next test
+// writes them. `go test -race` caught exactly that.
 var (
-	// livenessGracePeriod gives the onstart script time to write itself and
-	// exec the server before a missing process counts as a crash.
-	livenessGracePeriod = 90 * time.Second
-	livenessInterval    = 20 * time.Second
+	// livenessGraceNanos gives the onstart script time to write itself and exec
+	// the server before a missing process counts as a crash.
+	livenessGraceNanos    atomic.Int64
+	livenessIntervalNanos atomic.Int64
 )
+
+func init() {
+	livenessGraceNanos.Store(int64(90 * time.Second))
+	livenessIntervalNanos.Store(int64(20 * time.Second))
+}
+
+func livenessGracePeriod() time.Duration { return time.Duration(livenessGraceNanos.Load()) }
+func livenessInterval() time.Duration    { return time.Duration(livenessIntervalNanos.Load()) }
 
 // markHostBadUnlessCancelled records a host-side failure, except when the cause
 // was the user interrupting the deploy.
@@ -474,10 +488,10 @@ func (s *DeployService) watchServerProcess(ctx context.Context, model *entity.Mo
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(livenessGracePeriod):
+	case <-time.After(livenessGracePeriod()):
 	}
 
-	ticker := time.NewTicker(livenessInterval)
+	ticker := time.NewTicker(livenessInterval())
 	defer ticker.Stop()
 
 	liveness := s.engine.LivenessCommand()

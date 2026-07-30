@@ -331,9 +331,13 @@ func TestDeployDoesNotBlameAPromptHostForATimeout(t *testing.T) {
 
 // withFastLivenessWatcher shrinks the watcher cadence and returns a restore func.
 func withFastLivenessWatcher() func() {
-	grace, interval := livenessGracePeriod, livenessInterval
-	livenessGracePeriod, livenessInterval = 10*time.Millisecond, 10*time.Millisecond
-	return func() { livenessGracePeriod, livenessInterval = grace, interval }
+	grace, interval := livenessGraceNanos.Load(), livenessIntervalNanos.Load()
+	livenessGraceNanos.Store(int64(10 * time.Millisecond))
+	livenessIntervalNanos.Store(int64(10 * time.Millisecond))
+	return func() {
+		livenessGraceNanos.Store(grace)
+		livenessIntervalNanos.Store(interval)
+	}
 }
 
 // Start must re-read the SSH host/port: vast.ai reassigns them on resume, so
