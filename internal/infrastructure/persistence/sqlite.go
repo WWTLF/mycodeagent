@@ -55,18 +55,27 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	// Additive migrations. ALTER fails harmlessly on a DB that already has the
-	// column, which is why the errors are ignored.
+	// Migrations, all idempotent by error: each statement fails harmlessly once
+	// it has already been applied, which is why the errors are ignored. Nothing
+	// here may drop data a later version still needs.
 	//
-	//   num_gpus       — restart re-emits the same GPU split (--split-mode).
-	//   context_length — restart re-emits the *scaled* window rather than the
-	//                    catalog baseline; the offer is gone by then, so it can't
-	//                    be recomputed. 0 on legacy rows means "fall back to the
-	//                    model definition".
+	// Additive — both are re-emitted by `restart`, which runs after the offer is
+	// gone and so cannot recompute them:
+	//   num_gpus       — the GPU split the instance was deployed with.
+	//   context_length — the *scaled* window, not the catalog baseline. 0 on
+	//                    legacy rows means "fall back to the model definition".
 	//
-	// (Older DBs may also carry now-unused volume_id / volume_name columns; the instance
-	// repo selects columns explicitly so leftover columns are harmless.)
-	db.Exec("ALTER TABLE instances ADD COLUMN num_gpus INTEGER NOT NULL DEFAULT 0")
-	db.Exec("ALTER TABLE instances ADD COLUMN context_length INTEGER NOT NULL DEFAULT 0")
+	// Subtractive — leftovers from the removed persistent-volume support. Harmless
+	// (reads use an explicit column list) but they make the schema lie about what
+	// the tool does. DROP COLUMN needs SQLite >= 3.35; the driver ships 3.53.
+	for _, stmt := range []string{
+		"ALTER TABLE instances ADD COLUMN num_gpus INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE instances ADD COLUMN context_length INTEGER NOT NULL DEFAULT 0",
+		"DROP TABLE IF EXISTS volumes",
+		"ALTER TABLE instances DROP COLUMN volume_id",
+		"ALTER TABLE instances DROP COLUMN volume_name",
+	} {
+		db.Exec(stmt)
+	}
 	return nil
 }

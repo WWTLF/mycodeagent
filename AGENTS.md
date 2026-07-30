@@ -41,7 +41,8 @@ make clean              # rm -f mycodeagent
 ./mycodeagent models            # list available models
 ./mycodeagent init <name>       # deploy a model to vast.ai
 ./mycodeagent ps                # show running instances
-./mycodeagent stop <id>         # stop by DB ID (keeps instance)
+./mycodeagent stop <id>         # release GPU, keep instance + disk (disk still bills)
+./mycodeagent start <id>        # resume a stopped instance, reopen the tunnel
 ./mycodeagent kill <id>         # destroy an instance permanently
 ./mycodeagent restart <id>      # restart the model server
 ./mycodeagent budget            # show consumption by instances
@@ -74,6 +75,8 @@ already gone wrong, and so are never exercised by hand) are testable:
 | `TestDeployCleansUpWhenInstanceNeverStarts` | teardown before the row exists doesn't try to delete row 0 |
 | `TestDeploySuccessKeepsInstanceAndPersistsRuntimeShape` | the happy path destroys nothing; scaled context + GPU count are persisted |
 | `TestRestartReusesPersistedContextLength` | restart re-emits the deployed window, not the catalog baseline |
+| `TestStartRefreshesSSHAndReopensTunnel` | resume re-reads the SSH endpoint vast.ai reassigned |
+| `TestStartDoesNotDestroyOnFailure` | a failed resume never throws away an instance the user chose to keep |
 | `TestSyncDedupeKeepsTheRowWithTheTunnel` | dedupe keeps exactly one row — never deletes its own winner |
 | `TestSyncDropsRowsWhoseRemoteIsGone` | stale rows are removed and their tunnels killed |
 | `TestGetBudgetCountsStatusesCarryingADetailSuffix` | `"running (msg)"` still counts toward the totals |
@@ -197,7 +200,8 @@ All CLI commands live in `cmd/mycodeagent/commands/` and are wired in `main.go`:
 - `models` - list model catalog with pricing
 - `init` - deploy and tunnel
 - `ps` - list/sync instances
-- `stop` - stop instance (keeps it)
+- `stop` - release the GPU, keep instance + disk
+- `start` - resume a stopped instance and reopen its tunnel
 - `kill` - destroy an instance permanently
 - `budget` - spending breakdown
 - `tunnel` - re-establish SSH tunnel

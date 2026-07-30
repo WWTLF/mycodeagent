@@ -399,7 +399,23 @@ vast.ai bills two storages, *both* charged even when the GPU is idle (storage de
 
 Consequences in the design:
 - `CreateInstance` requests a per-model `disk` (`Model.DiskGB`); `SearchOffers` filters hosts on `DiskGB + 12 GB` free so the GGUF download + the image (~2.6 GB compressed, ~6 GB unpacked) + scratch always fit. There is no fixed 40 GB cap.
-- `stop` keeps the instance (still bills container-disk storage); `kill` destroys it (no further charges). For pay-as-you-go, prefer `kill` when done.
+- Legacy DBs are migrated: the `volumes` table and the `volume_id` / `volume_name` columns are dropped on open, so the schema stops describing a feature that no longer exists.
+
+### `stop`/`start` vs `kill` — the same arithmetic, one level down
+
+`stop` releases the GPU but keeps the instance, so the *container disk* keeps billing 24/7 at the same ~$0.15/GB/month. `start` resumes it: vast.ai re-runs the onstart script, the GGUF is still in the container-disk cache, and nothing is re-downloaded. The SSH host and port are reassigned on resume, so `Start` re-reads them from the API and opens a fresh tunnel — reusing the stored pair would forward to whatever now occupies the old slot.
+
+The economics mirror the volume decision exactly:
+
+| | `stop` → `start` | `kill` → `init` |
+|---|---|---|
+| Container disk (28 GB) | ~$0.006/hr, indefinitely | freed |
+| Model download on resume | skipped | ~2 min ≈ $0.004 of GPU time |
+| Host | the same physical machine | the cheapest offer at that moment |
+
+A day of idle disk is ~$0.14 against $0.004 of re-download, so **`stop` never wins on price** — not even overnight. It exists for the non-price cases: holding a specific host that turned out to be good, or pausing mid-debugging. `kill` is the correct end of a session.
+
+`Start` deliberately does *not* destroy the instance when it fails, unlike `Deploy`. Deploy created the instance and owns it; Start was handed one the user paid storage to preserve, and tearing it down on a transient SSH error would discard exactly what they were keeping. A failed `start` therefore leaves a billing GPU and says so, rather than cleaning up behind the user's back.
 
 ## Failure Handling & Cleanup
 
@@ -442,6 +458,7 @@ stateDiagram-v2
     WaitingHealth --> Running: /v1/models 200 OK
     WaitingHealth --> Failed: Crash (/proc scan dead) / timeout
     Running --> Stopped: stop <id>
+    Stopped --> WaitingSSH: start <id> (no download)
     Running --> Destroyed: kill <id>
     Failed --> Destroyed: auto-cleanup (destroy + tunnel + row)
     Stopped --> [*]
@@ -460,7 +477,7 @@ graph LR
 
 - Each `init` allocates a new local port (starting from `basePort`, scanning +100).
 - Tunnel runs as a background `ssh -N -L` process; PID saved to SQLite.
-- `stop` SIGTERMs the tunnel PID, then stops the vast.ai instance; `kill` destroys the instance + tunnel.
+- `stop` SIGTERMs the tunnel PID, then stops the vast.ai instance; `start` resumes it and opens a *new* tunnel (the SSH endpoint is reassigned); `kill` destroys the instance + tunnel.
 - `restart` regenerates the onstart script on the instance and restarts the server.
 
 ## llama.cpp Parameters Reference

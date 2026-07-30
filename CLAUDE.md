@@ -15,8 +15,9 @@ Key reference: https://docs.vast.ai/api-reference/introduction
 | `mycodeagent models` | List available models with live cheapest-offer pricing |
 | `mycodeagent init <model>` | Deploy model: rent GPU, start `llama-server` (downloads the GGUF from HuggingFace), establish SSH tunnel. Destroys the instance automatically if startup fails. |
 | `mycodeagent ps` | Sync with vast.ai and list deployed instances |
-| `mycodeagent stop <id>` | Stop an instance (keeps the vast.ai instance; can restart) |
-| `mycodeagent kill <id>` | Destroy an instance permanently |
+| `mycodeagent stop <id>` | Release the GPU, keep the instance + container disk (disk keeps billing) |
+| `mycodeagent start <id>` | Resume a stopped instance and reopen its tunnel; skips the GGUF download |
+| `mycodeagent kill <id>` | Destroy an instance permanently — the cheap way to finish |
 | `mycodeagent restart <id>` | Regenerate the startup script and restart the server |
 | `mycodeagent tunnel <vastai_id>` | Re-attach an SSH tunnel to a running instance |
 | `mycodeagent log <id>` | Fetch the vast.ai bootstrap log |

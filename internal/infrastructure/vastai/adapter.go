@@ -111,6 +111,10 @@ func (a *Adapter) StopInstance(instanceID int) error {
 	return a.client.StopInstance(instanceID)
 }
 
+func (a *Adapter) StartInstance(instanceID int) error {
+	return a.client.StartInstance(instanceID)
+}
+
 func (a *Adapter) DestroyInstance(instanceID int) error {
 	return a.client.DestroyInstance(instanceID)
 }

@@ -82,6 +82,7 @@ func main() {
 		commands.NewInitCmd(app),
 		commands.NewPsCmd(app),
 		commands.NewStopCmd(app),
+		commands.NewStartCmd(app),
 		commands.NewKillCmd(app),
 		commands.NewBudgetCmd(app),
 		commands.NewTunnelCmd(app),

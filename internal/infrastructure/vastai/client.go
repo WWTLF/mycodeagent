@@ -124,7 +124,11 @@ func (c *Client) VerifyAPIKey() error {
 // minDiskGB is the minimum *host* free disk to require (container disk + image
 // + scratch); pass <= 0 to fall back to a safe default.
 func (c *Client) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]Offer, error) {
-	// gpu_ram is in MB on vast.ai API; compute_cap >= 800 required for AWQ/GPTQ kernels.
+	// gpu_ram is in MB on vast.ai API. compute_cap >= 800 keeps us on Ampere or
+	// newer: llama.cpp's CUDA build runs on much older cards, but the ggml kernels
+	// we care about (flash attention with a quantized KV cache, `-fa on` +
+	// --cache-type-v, which the whole catalog depends on) want Ampere-class
+	// tensor cores to not fall off a performance cliff.
 	// Use 90% threshold to catch GPUs that report slightly less (e.g. RTX 3090 reports ~23GB).
 	// cuda_vers >= 12.8 filters by the CUDA *toolkit* installed on the host, but that's
 	// not enough — what actually matters for forward compatibility is the *driver* cap.
@@ -217,7 +221,8 @@ func (c *Client) ListInstances() ([]InstanceInfo, error) {
 	return result.Instances, nil
 }
 
-// StopInstance stops a running instance.
+// StopInstance stops a running instance. The instance keeps existing (and keeps
+// billing container-disk storage); StartInstance is the inverse.
 func (c *Client) StopInstance(instanceID int) error {
 	url := fmt.Sprintf("%s/api/v0/instances/%d/", baseURL, instanceID)
 
@@ -225,6 +230,21 @@ func (c *Client) StopInstance(instanceID int) error {
 	var resp map[string]any
 	if err := c.doPut(url, body, &resp); err != nil {
 		return fmt.Errorf("stop instance %d: %w", instanceID, err)
+	}
+	return nil
+}
+
+// StartInstance resumes a stopped instance. vast.ai re-runs the onstart script
+// on every container start, so the model server comes back on its own — and the
+// GGUF is still in the container disk cache, so nothing is re-downloaded.
+// The SSH host/port are reassigned on resume and must be re-read afterwards.
+func (c *Client) StartInstance(instanceID int) error {
+	url := fmt.Sprintf("%s/api/v0/instances/%d/", baseURL, instanceID)
+
+	body := map[string]any{"state": "running"}
+	var resp map[string]any
+	if err := c.doPut(url, body, &resp); err != nil {
+		return fmt.Errorf("start instance %d: %w", instanceID, err)
 	}
 	return nil
 }

@@ -90,6 +90,12 @@ func (app *App) Stop(ctx context.Context, id int64) error {
 	return app.InstanceSvc.StopTunnel(ctx, id)
 }
 
+// Start resumes a stopped instance and re-establishes its tunnel. The inverse of
+// Stop — without it, `stop` would be a one-way door out of this CLI.
+func (app *App) Start(ctx context.Context, id int64) error {
+	return app.DeploySvc.Start(ctx, id)
+}
+
 func (app *App) Destroy(ctx context.Context, id int64) error {
 	return app.DeploySvc.Destroy(ctx, id)
 }

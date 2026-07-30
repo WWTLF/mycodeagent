@@ -38,7 +38,8 @@ yet — without it the tunnel can't be established.
 | `mycodeagent init <model>` | Rent a GPU, start `llama-server`, open the SSH tunnel. Self-destroys on failure. |
 | `mycodeagent init <model> --create-instance-only` | Create the instance and print SSH details; no tunnel, no health wait |
 | `mycodeagent ps` | Sync with vast.ai and list instances (status, health, tunnel URL) |
-| `mycodeagent stop <id>` | Stop the instance — keeps it (and its disk billing); can be restarted |
+| `mycodeagent stop <id>` | Release the GPU but keep the instance + disk (see the cost note below) |
+| `mycodeagent start <id>` | Resume a stopped instance and reopen its tunnel — skips the download |
 | `mycodeagent kill <id>` | Destroy permanently. **This is the one you want when you're done.** |
 | `mycodeagent restart <id>` | Regenerate the startup script on the instance and restart the server |
 | `mycodeagent tunnel <vastai_id>` | Re-attach an SSH tunnel to an already-running instance |
@@ -51,6 +52,25 @@ yet — without it the tunnel can't be established.
 `<id>` is the local DB id shown by `ps`, not the vast.ai id.
 
 Add `-v` to any command to log every vast.ai API request and response.
+
+### `stop` vs `kill`
+
+Both release the GPU. The difference is the **container disk**, which vast.ai bills
+around the clock (~$0.15/GB/month) for as long as the instance exists:
+
+| | `stop` → `start` | `kill` → `init` |
+|---|---|---|
+| Instance on vast.ai | kept, state `stopped` | destroyed |
+| Container disk | keeps billing (~$0.006/h for 28 GB) | freed |
+| GGUF cache | preserved — resume skips the download | gone, re-downloaded (~2 min) |
+| Same physical host | yes | no, picks the cheapest offer again |
+
+Those two minutes of download cost about **$0.004** of GPU time, while a day of
+idle disk costs **$0.14**. So `stop` never wins on price — not even overnight.
+Reach for it when you want to *hold a specific host* or pause mid-debugging, and
+use `kill` when you're done for the day.
+
+Ctrl-C during `init` is safe: the instance is torn down before the process exits.
 
 ## Model catalog
 

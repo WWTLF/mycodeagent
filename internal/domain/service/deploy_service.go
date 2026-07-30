@@ -18,6 +18,7 @@ type VastaiProvider interface {
 	CreateInstance(offerID int, image string, envVars map[string]string, onstart string, diskGB int) (instanceID int, err error)
 	WaitForInstance(ctx context.Context, instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error)
 	StopInstance(instanceID int) error
+	StartInstance(instanceID int) error
 	DestroyInstance(instanceID int) error
 
 	// Read-side instance access (used by InstanceService for ps/tunnel/sync flows).
@@ -491,6 +492,102 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string) 
 	}
 
 	return &CreateOnlyResult{Instance: inst, ServeCommand: s.engine.BuildRawCommand(model, offer.NumGPUs, contextLength)}, nil
+}
+
+// Start resumes a stopped instance and re-establishes its tunnel.
+//
+// Unlike Deploy this does NOT destroy the instance on failure: Deploy created the
+// instance and therefore owns it, whereas here the user deliberately kept it
+// alive. Tearing it down on a transient error would throw away the very thing
+// they were paying storage to preserve. A failed Start leaves a billing GPU, so
+// it says so loudly instead of cleaning up behind the user's back.
+//
+// vast.ai re-runs the onstart script on container start, so the model server
+// comes back by itself and the GGUF is still in the container-disk cache — this
+// is the one path that skips the download.
+func (s *DeployService) Start(ctx context.Context, id int64) error {
+	inst, err := s.instances.FindByID(id)
+	if err != nil {
+		return err
+	}
+
+	// The startup budget comes from the model when it's still in the catalog; a
+	// row referencing a removed model still has to be startable.
+	timeout := 10 * time.Minute
+	if model, err := s.models.FindByName(inst.ModelName); err == nil && model.StartupTimeout > 0 {
+		timeout = model.StartupTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	fmt.Printf("Starting instance %d (%s)...\n", inst.VastaiID, inst.ModelName)
+	if err := s.vastai.StartInstance(int(inst.VastaiID)); err != nil {
+		return fmt.Errorf("start vast.ai instance: %w", err)
+	}
+
+	// From here the GPU is billing again. Every early return below must say so.
+	warn := func(err error) error {
+		fmt.Printf("\nWARNING: instance %d is running and billing, but the tunnel was not established.\n", inst.VastaiID)
+		fmt.Printf("Retry with `mycodeagent start %d`, or destroy it with `mycodeagent kill %d`.\n", id, id)
+		return err
+	}
+
+	fmt.Println("Waiting for instance to start...")
+	// SSH host and port are reassigned on resume — never reuse the stored ones.
+	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, int(inst.VastaiID))
+	if err != nil {
+		return warn(fmt.Errorf("wait for instance: %w", err))
+	}
+	fmt.Printf("Instance running: SSH at %s:%d\n", sshHost, sshPort)
+
+	fmt.Println("Waiting for SSH...")
+	if err := s.ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
+		return warn(fmt.Errorf("wait for SSH: %w", err))
+	}
+
+	localPort, err := s.ssh.FindFreePort(s.basePort)
+	if err != nil {
+		return warn(fmt.Errorf("find free port: %w", err))
+	}
+
+	fmt.Printf("Starting SSH tunnel on port %d...\n", localPort)
+	tunnelPID, err := s.ssh.StartTunnel(localPort, sshHost, sshPort)
+	if err != nil {
+		return warn(fmt.Errorf("start tunnel: %w", err))
+	}
+
+	inst.Status = entity.StatusRunning
+	inst.SSHHost = sshHost
+	inst.SSHPort = sshPort
+	inst.LocalPort = localPort
+	inst.TunnelPID = tunnelPID
+	inst.HourlyRate = hourlyRate
+	if err := s.instances.Update(inst); err != nil {
+		return warn(fmt.Errorf("update instance: %w", err))
+	}
+
+	fmt.Println("Waiting for model server (weights are cached on the container disk, no download)...")
+	healthCh := make(chan error, 1)
+	failCh := make(chan error, 1)
+	go func() { healthCh <- s.ssh.WaitForServerHealth(ctx, localPort) }()
+	go s.watchServerProcess(ctx, sshHost, sshPort, failCh)
+
+	select {
+	case healthErr := <-healthCh:
+		if healthErr != nil {
+			return warn(fmt.Errorf("model server health check: %w", healthErr))
+		}
+	case crashErr := <-failCh:
+		return warn(fmt.Errorf("model server crashed during startup: %w", crashErr))
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return warn(fmt.Errorf("start interrupted"))
+		}
+		return warn(fmt.Errorf("start timed out after %s", timeout))
+	}
+
+	fmt.Printf("\nAPI available at: http://localhost:%d/v1\n", localPort)
+	return nil
 }
 
 // Stop stops a single instance by local DB ID.

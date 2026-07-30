@@ -200,6 +200,8 @@ type fakeVastai struct {
 	destroyed  []int
 	destroyErr error
 	stopped    []int
+	started    []int
+	startErr   error
 }
 
 var _ VastaiProvider = (*fakeVastai)(nil)
@@ -220,6 +222,10 @@ func (v *fakeVastai) WaitForInstance(ctx context.Context, id int) (string, int, 
 	return "ssh.example", 2222, 0.25, nil
 }
 func (v *fakeVastai) StopInstance(id int) error { v.stopped = append(v.stopped, id); return nil }
+func (v *fakeVastai) StartInstance(id int) error {
+	v.started = append(v.started, id)
+	return v.startErr
+}
 func (v *fakeVastai) DestroyInstance(id int) error {
 	v.destroyed = append(v.destroyed, id)
 	return v.destroyErr

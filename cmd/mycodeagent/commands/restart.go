@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 
@@ -19,7 +18,7 @@ func NewRestartCmd(app *application.App) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid instance ID: %s", args[0])
 			}
-			return app.Restart(context.Background(), id)
+			return app.Restart(cmd.Context(), id)
 		},
 	}
 }

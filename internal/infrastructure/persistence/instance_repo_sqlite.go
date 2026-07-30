@@ -9,8 +9,9 @@ import (
 )
 
 // instanceColumns is the explicit projection used by every read. Listing columns
-// (instead of SELECT *) keeps the code working on older DBs that still carry the
-// now-removed volume_id / volume_name columns.
+// instead of SELECT * keeps reads stable across schema migrations — it is what
+// let the now-dropped volume_id / volume_name columns sit unused for a release
+// without breaking anything.
 const instanceColumns = "id, vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, created_at, num_gpus, context_length"
 
 type SQLiteInstanceRepository struct {

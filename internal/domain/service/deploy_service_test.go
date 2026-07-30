@@ -174,6 +174,64 @@ func TestRestartReusesPersistedContextLength(t *testing.T) {
 	}
 }
 
+// Start must re-read the SSH host/port: vast.ai reassigns them on resume, so
+// reusing the stored ones would tunnel to whatever now occupies the old slot.
+func TestStartRefreshesSSHAndReopensTunnel(t *testing.T) {
+	model := testDeployModel()
+	repo := newFakeInstanceRepo(&entity.Instance{
+		VastaiID: 55, ModelName: model.Name, Status: entity.StatusStopped,
+		SSHHost: "stale.host", SSHPort: 1111, LocalPort: 0, TunnelPID: 0,
+	})
+	vast := &fakeVastai{} // WaitForInstance returns ssh.example:2222
+	ssh := &fakeSSH{tunnelPID: 777}
+	svc, _ := newTestDeploy(model, vast, ssh, repo)
+
+	id := repo.ids()[0]
+	if err := svc.Start(context.Background(), id); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	if len(vast.started) != 1 || vast.started[0] != 55 {
+		t.Errorf("expected StartInstance(55), got %v", vast.started)
+	}
+	got, _ := repo.FindByID(id)
+	if got.SSHHost == "stale.host" || got.SSHPort == 1111 {
+		t.Errorf("start reused the stale SSH endpoint: %s:%d", got.SSHHost, got.SSHPort)
+	}
+	if got.SSHHost != "ssh.example" || got.SSHPort != 2222 {
+		t.Errorf("SSH endpoint = %s:%d, want ssh.example:2222", got.SSHHost, got.SSHPort)
+	}
+	if got.TunnelPID != 777 || got.LocalPort != 8000 {
+		t.Errorf("tunnel not recorded: pid=%d port=%d", got.TunnelPID, got.LocalPort)
+	}
+	if !got.Status.Is(entity.StatusRunning) {
+		t.Errorf("status = %q, want running", got.Status)
+	}
+	if len(vast.destroyed) != 0 {
+		t.Errorf("start must never destroy the instance: %v", vast.destroyed)
+	}
+}
+
+// A failed Start must NOT destroy the instance — the user paid storage to keep
+// it, and Start didn't create it. This is the deliberate difference from Deploy.
+func TestStartDoesNotDestroyOnFailure(t *testing.T) {
+	model := testDeployModel()
+	repo := newFakeInstanceRepo(&entity.Instance{
+		VastaiID: 55, ModelName: model.Name, Status: entity.StatusStopped,
+	})
+	vast := &fakeVastai{waitErr: context.DeadlineExceeded}
+	svc, _ := newTestDeploy(model, vast, &fakeSSH{}, repo)
+
+	if err := svc.Start(context.Background(), repo.ids()[0]); err == nil {
+		t.Fatal("expected start to fail")
+	}
+	if len(vast.destroyed) != 0 {
+		t.Errorf("start destroyed an instance the user chose to keep: %v", vast.destroyed)
+	}
+	if repo.count() != 1 {
+		t.Errorf("start deleted the local row: %d rows left", repo.count())
+	}
+}
+
 // Legacy rows predate the column and carry 0 — those fall back to the catalog.
 func TestRestartFallsBackToCatalogContextForLegacyRows(t *testing.T) {
 	model := testDeployModel()

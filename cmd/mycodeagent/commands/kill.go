@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 
@@ -19,7 +18,7 @@ func NewKillCmd(app *application.App) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid instance ID: %s", args[0])
 			}
-			if err := app.Destroy(context.Background(), id); err != nil {
+			if err := app.Destroy(cmd.Context(), id); err != nil {
 				return err
 			}
 			fmt.Printf("Instance %d destroyed.\n", id)
