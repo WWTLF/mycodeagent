@@ -1,0 +1,195 @@
+package service
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/WWTLF/mycodeagent/internal/domain/entity"
+)
+
+func testDeployModel() *entity.Model {
+	return &entity.Model{
+		Name:             "test-model",
+		Alias:            "t",
+		HFRepo:           "unsloth/Test-GGUF",
+		Quant:            "Q4_K_M",
+		VRAM:             24,
+		NumGPUs:          1,
+		DiskGB:           30,
+		StartupTimeout:   2 * time.Second,
+		ContextLength:    32768,
+		MaxContextLength: 262144,
+	}
+}
+
+func newTestDeploy(model *entity.Model, vast *fakeVastai, ssh *fakeSSH, repo *fakeInstanceRepo) (*DeployService, *fakeEngine) {
+	eng := &fakeEngine{}
+	return NewDeployService(
+		&fakeModelRepo{models: []*entity.Model{model}},
+		repo,
+		newFakeBadHostRepo(),
+		vast, ssh, eng,
+		8000, "",
+	), eng
+}
+
+func oneOffer() []OfferResult {
+	return []OfferResult{{ID: 7, GPUName: "RTX 3090", NumGPUs: 1, GPUMemory: 24576, DPHTotal: 0.11, MachineID: 555}}
+}
+
+// A deploy that dies after the instance row is written must leave NOTHING behind:
+// no vast.ai instance, no tunnel, and no local row. The row delete is the part
+// that regressed — the cleanup used to key off the named return value, which every
+// `return nil, err` had already set to nil before the deferred function ran.
+func TestDeployCleansUpLocalRowWhenHealthCheckFails(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+	ssh := &fakeSSH{tunnelPID: 31337, healthErr: context.DeadlineExceeded}
+
+	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
+
+	inst, err := svc.Deploy(context.Background(), "test-model")
+	if err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	if inst != nil {
+		t.Errorf("failed deploy returned an instance: %+v", inst)
+	}
+	if got := repo.count(); got != 0 {
+		t.Errorf("failed deploy left %d local row(s) behind; they inflate `budget` and make `config` write a dead provider", got)
+	}
+	if len(vast.destroyed) != 1 || vast.destroyed[0] != 4242 {
+		t.Errorf("expected instance 4242 to be destroyed, got %v", vast.destroyed)
+	}
+	if stopped := ssh.stopped(); len(stopped) != 1 || stopped[0] != 31337 {
+		t.Errorf("expected tunnel 31337 to be stopped, got %v", stopped)
+	}
+}
+
+// Ctrl-C cancels the caller's context. That must run the same teardown as any
+// other failure — otherwise interrupting a 15-minute deploy leaves a billing GPU.
+func TestDeployDestroysInstanceOnContextCancel(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 99}
+	ssh := &fakeSSH{tunnelPID: 1, healthWait: time.Minute} // never becomes healthy
+
+	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := svc.Deploy(ctx, "test-model")
+	if err == nil {
+		t.Fatal("expected an error after cancellation")
+	}
+	if !strings.Contains(err.Error(), "interrupted") {
+		t.Errorf("cancellation should be reported as an interrupt, not a timeout: %v", err)
+	}
+	if len(vast.destroyed) != 1 {
+		t.Errorf("interrupted deploy did not destroy the instance (still billing): %v", vast.destroyed)
+	}
+	if repo.count() != 0 {
+		t.Errorf("interrupted deploy left %d local row(s)", repo.count())
+	}
+}
+
+// A failure *before* the row is written must not try to delete row 0.
+func TestDeployCleansUpWhenInstanceNeverStarts(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 11, waitErr: context.DeadlineExceeded}
+	ssh := &fakeSSH{tunnelPID: 5}
+
+	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
+
+	if _, err := svc.Deploy(context.Background(), "test-model"); err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	if repo.count() != 0 {
+		t.Errorf("expected no local rows, got %d", repo.count())
+	}
+	if len(vast.destroyed) != 1 {
+		t.Errorf("expected the instance to be destroyed, got %v", vast.destroyed)
+	}
+	if stopped := ssh.stopped(); len(stopped) != 0 {
+		t.Errorf("no tunnel was started, so none should be stopped: %v", stopped)
+	}
+}
+
+// The happy path must NOT tear anything down.
+func TestDeploySuccessKeepsInstanceAndPersistsRuntimeShape(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	// 48 GB per GPU against a 24 GB baseline ⇒ scaledContextLength doubles the window.
+	vast := &fakeVastai{
+		offers:    []OfferResult{{ID: 7, NumGPUs: 1, GPUMemory: 49152, DPHTotal: 0.4, MachineID: 1}},
+		createdID: 77,
+	}
+	ssh := &fakeSSH{tunnelPID: 4242}
+
+	svc, eng := newTestDeploy(testDeployModel(), vast, ssh, repo)
+
+	inst, err := svc.Deploy(context.Background(), "test-model")
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+	if len(vast.destroyed) != 0 {
+		t.Errorf("successful deploy destroyed the instance: %v", vast.destroyed)
+	}
+	if repo.count() != 1 {
+		t.Fatalf("expected exactly 1 persisted row, got %d", repo.count())
+	}
+	if eng.lastContext != 65536 {
+		t.Errorf("expected the scaled context (65536) to reach the engine, got %d", eng.lastContext)
+	}
+	// Restart re-reads these from the row, so they must match what was launched.
+	if inst.ContextLength != eng.lastContext {
+		t.Errorf("persisted ContextLength %d != launched %d", inst.ContextLength, eng.lastContext)
+	}
+	if inst.NumGPUs != 1 {
+		t.Errorf("persisted NumGPUs = %d, want 1", inst.NumGPUs)
+	}
+}
+
+// Restart must relaunch with the window the instance was actually deployed with.
+// Falling back to the catalog baseline silently shrank the context on any rental
+// whose GPUs were fatter than the tier minimum.
+func TestRestartReusesPersistedContextLength(t *testing.T) {
+	model := testDeployModel()
+	repo := newFakeInstanceRepo(&entity.Instance{
+		VastaiID: 5, ModelName: model.Name, Status: entity.StatusRunning,
+		SSHHost: "h", SSHPort: 22, NumGPUs: 1, ContextLength: 131072,
+	})
+	svc, eng := newTestDeploy(model, &fakeVastai{}, &fakeSSH{}, repo)
+
+	if err := svc.Restart(context.Background(), repo.ids()[0]); err != nil {
+		t.Fatalf("restart failed: %v", err)
+	}
+	if eng.lastContext != 131072 {
+		t.Errorf("restart used context %d, want the persisted 131072 (catalog baseline is %d)",
+			eng.lastContext, model.ContextLength)
+	}
+}
+
+// Legacy rows predate the column and carry 0 — those fall back to the catalog.
+func TestRestartFallsBackToCatalogContextForLegacyRows(t *testing.T) {
+	model := testDeployModel()
+	repo := newFakeInstanceRepo(&entity.Instance{
+		VastaiID: 5, ModelName: model.Name, Status: entity.StatusRunning,
+		SSHHost: "h", SSHPort: 22, NumGPUs: 0, ContextLength: 0,
+	})
+	svc, eng := newTestDeploy(model, &fakeVastai{}, &fakeSSH{}, repo)
+
+	if err := svc.Restart(context.Background(), repo.ids()[0]); err != nil {
+		t.Fatalf("restart failed: %v", err)
+	}
+	if eng.lastContext != model.ContextLength {
+		t.Errorf("legacy row should fall back to %d, got %d", model.ContextLength, eng.lastContext)
+	}
+	if eng.lastNumGPUs != model.NumGPUs {
+		t.Errorf("legacy row should fall back to %d GPUs, got %d", model.NumGPUs, eng.lastNumGPUs)
+	}
+}

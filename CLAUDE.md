@@ -21,20 +21,24 @@ Key reference: https://docs.vast.ai/api-reference/introduction
 | `mycodeagent tunnel <vastai_id>` | Re-attach an SSH tunnel to a running instance |
 | `mycodeagent log <id>` | Fetch the vast.ai bootstrap log |
 | `mycodeagent budget` | Show consumption by instances |
+| `mycodeagent config` | Write all running instances into `~/.config/opencode/opencode.jsonc` |
+| `mycodeagent hosts` | Inspect / clear the bad-host blacklist |
+| `mycodeagent login` | Store the vast.ai key + HF token, upload the SSH public key |
+| `mycodeagent info` | Runtime summary |
 
 ## Architecture
 
 Follow **DDD / SOLID / Clean Architecture** layering. The engine is reached only through the `service.EngineProvider` interface — if you find yourself writing a llama.cpp flag, a process name or a log path anywhere outside `internal/infrastructure/engine/`, it belongs behind that interface instead.
 
 ```
-Application Service    ← orchestrates use cases (init, stop, pull, etc.)
+Application Service    ← orchestrates use cases (init, stop, sync, login, …)
 Domain
-  ├── Service          ← business logic (tunnel management, model resolution)
-  ├── Entity           ← Instance, Model, Tunnel, Budget
+  ├── Service          ← business logic (deploy lifecycle, tunnels, model resolution)
+  ├── Entity           ← Instance, Model, BadHost, Budget
   └── Repository       ← interfaces only
 Infrastructure
-  ├── Repository impl  ← SQLite (~/.mycodeagent/sqlite), vast.ai API client
-  └── API impl         ← vast.ai REST calls, SSH/tunnel operations
+  ├── Repository impl  ← SQLite (~/.mycodeagent/mycodeagent.db), static model catalog
+  └── API impl         ← vast.ai REST calls, SSH/tunnel operations, engine, server probe
 ```
 
 Dependencies point inward: Infrastructure → Domain ← Application. Domain has zero external imports.
@@ -60,5 +64,6 @@ Dependencies point inward: Infrastructure → Domain ← Application. Domain has
 ```bash
 go build -o mycodeagent ./cmd/mycodeagent
 go test ./...
-go test ./domain/...    # run tests for a single package tree
+go test ./internal/infrastructure/...   # run tests for a single package tree
+go vet ./... && gofmt -l .              # pre-commit check
 ```

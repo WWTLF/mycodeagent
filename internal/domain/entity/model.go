@@ -15,7 +15,7 @@ type Model struct {
 	Quant            string // quant tag inside HFRepo, e.g. "UD-Q4_K_XL" (empty = llama.cpp picks Q4_K_M)
 	Category         ModelCategory
 	VRAM             int           // GB required per GPU (baseline)
-	NumGPUs          int           // preferred GPU count (the real count comes from the offer)
+	NumGPUs          int           // GPU count to rent; SearchOffers matches it with `eq`, so the offer always has exactly this many
 	DiskGB           int           // container disk to request on vast.ai; sized to hold the image + GGUF download + scratch (0 = default)
 	StartupTimeout   time.Duration // max time to wait for instance + model server to become healthy
 	ContextLength    int           // baseline context length sized for VRAM (0 = engine default)

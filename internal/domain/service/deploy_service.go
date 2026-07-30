@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -205,7 +206,7 @@ func scaledContextLength(model *entity.Model, offerGPUMemoryMB float64) int {
 // Deploy executes the full init flow: find offer → create instance → SSH → tunnel → health.
 // Instances are disposable: if any step after creation fails, the vast.ai instance
 // is destroyed and the tunnel killed so a failed deploy never leaves a paid GPU running.
-func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *entity.Instance, err error) {
+func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.Instance, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -257,22 +258,33 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *ent
 
 	// From here on the vast.ai instance is billing. Any failure must tear it
 	// down (and the tunnel + DB row) so a failed startup leaves nothing running.
+	//
+	// tunnelPID and savedID are plain locals rather than the named results on
+	// purpose: every failure path below does `return nil, err`, which would
+	// assign nil to a named `inst` result *before* this deferred function runs,
+	// so a cleanup keyed on `inst` would silently skip the row delete.
 	deployed := false
 	tunnelPID := 0
+	var savedID int64
 	defer func() {
 		if deployed {
 			return
 		}
+		// Print before the API calls: on Ctrl-C this is the user's signal that
+		// teardown is in progress and a second interrupt would abort it.
+		fmt.Printf("\nCleaning up: destroying instance %d so it stops billing...\n", instanceID)
 		if tunnelPID > 0 {
 			_ = s.ssh.StopTunnel(tunnelPID)
 		}
 		if destroyErr := s.vastai.DestroyInstance(instanceID); destroyErr != nil {
 			fmt.Printf("Warning: failed to destroy instance %d during cleanup: %v\n", instanceID, destroyErr)
+			fmt.Printf("IMPORTANT: destroy it manually — `mycodeagent ps` then `mycodeagent kill <id>`.\n")
+		} else {
+			fmt.Printf("Destroyed instance %d after failed deploy (no further charges).\n", instanceID)
 		}
-		if inst != nil && inst.ID > 0 {
-			_ = s.instances.Delete(inst.ID)
+		if savedID > 0 {
+			_ = s.instances.Delete(savedID)
 		}
-		fmt.Printf("Destroyed instance %d after failed deploy (no further charges).\n", instanceID)
 	}()
 
 	fmt.Println("Waiting for instance to start...")
@@ -302,20 +314,22 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *ent
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}
 
-	inst = &entity.Instance{
-		VastaiID:   int64(instanceID),
-		ModelName:  model.Name,
-		Status:     entity.StatusRunning,
-		LocalPort:  localPort,
-		SSHHost:    sshHost,
-		SSHPort:    sshPort,
-		TunnelPID:  tunnelPID,
-		HourlyRate: hourlyRate,
-		NumGPUs:    offer.NumGPUs,
+	inst := &entity.Instance{
+		VastaiID:      int64(instanceID),
+		ModelName:     model.Name,
+		Status:        entity.StatusRunning,
+		LocalPort:     localPort,
+		SSHHost:       sshHost,
+		SSHPort:       sshPort,
+		TunnelPID:     tunnelPID,
+		HourlyRate:    hourlyRate,
+		NumGPUs:       offer.NumGPUs,
+		ContextLength: contextLength,
 	}
 	if err := s.instances.Save(inst); err != nil {
 		return nil, fmt.Errorf("save instance: %w", err)
 	}
+	savedID = inst.ID
 
 	fmt.Println("Waiting for model server to become healthy (model downloading, this may take a while)...")
 	healthCh := make(chan error, 1)
@@ -336,6 +350,11 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (inst *ent
 	case crashErr := <-failCh:
 		return nil, fmt.Errorf("model server crashed during startup: %w", crashErr)
 	case <-ctx.Done():
+		// Distinguish "we ran out of time" from "the user pressed Ctrl-C" —
+		// both land here, but only one of them is a problem to investigate.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, fmt.Errorf("startup interrupted")
+		}
 		return nil, fmt.Errorf("startup timed out after %s", timeout)
 	}
 
@@ -458,13 +477,14 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string) 
 	}
 
 	inst := &entity.Instance{
-		VastaiID:   int64(instanceID),
-		ModelName:  model.Name,
-		Status:     entity.StatusRunning,
-		SSHHost:    sshHost,
-		SSHPort:    sshPort,
-		HourlyRate: hourlyRate,
-		NumGPUs:    offer.NumGPUs,
+		VastaiID:      int64(instanceID),
+		ModelName:     model.Name,
+		Status:        entity.StatusRunning,
+		SSHHost:       sshHost,
+		SSHPort:       sshPort,
+		HourlyRate:    hourlyRate,
+		NumGPUs:       offer.NumGPUs,
+		ContextLength: contextLength,
 	}
 	if err := s.instances.Save(inst); err != nil {
 		return nil, fmt.Errorf("save instance: %w", err)
@@ -524,20 +544,31 @@ func (s *DeployService) Restart(ctx context.Context, id int64) error {
 	}
 
 	// Regenerate the startup script on the instance so fixes are picked up.
-	// Use the GPU count actually allocated at deploy time (persisted on the instance row),
-	// falling back to model.NumGPUs for legacy rows that predate the column.
-	// Restart happens after the offer is gone, so use the model's baseline context length.
+	// The offer is gone by now, so both the GPU count and the context length come
+	// from what was persisted at deploy time; the model definition is only the
+	// fallback for legacy rows that predate those columns. Using the catalog
+	// baseline instead would silently shrink the window on a rental whose GPUs
+	// were fatter than the tier minimum.
 	numGPUs := inst.NumGPUs
 	if numGPUs <= 0 {
 		numGPUs = model.NumGPUs
 	}
+	contextLength := inst.ContextLength
+	if contextLength <= 0 {
+		contextLength = model.ContextLength
+	}
 	fmt.Println("Updating startup script...")
-	onstart := s.engine.BuildOnstart(model, numGPUs, model.ContextLength, s.hfToken)
+	onstart := s.engine.BuildOnstart(model, numGPUs, contextLength, s.hfToken)
 	// BuildOnstart returns: echo '...' > /tmp/script.sh && chmod +x ... && bash ...
-	// Strip the final "&& bash ..." to only write the file without executing
-	if idx := strings.LastIndex(onstart, " && bash "); idx > 0 {
-		writeOnly := onstart[:idx]
-		s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, writeOnly)
+	// Strip the final "&& bash ..." to only write the file without executing.
+	// If the rewrite fails, stop: restarting would silently relaunch the old
+	// script, which looks like a successful restart that changed nothing.
+	idx := strings.LastIndex(onstart, " && bash ")
+	if idx <= 0 {
+		return fmt.Errorf("onstart script has no ' && bash ' separator to split on")
+	}
+	if out, err := s.ssh.RunRemoteCommand(inst.SSHHost, inst.SSHPort, onstart[:idx]); err != nil {
+		return fmt.Errorf("write startup script: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	killCmd, startCmd := s.engine.RestartCommands(model)

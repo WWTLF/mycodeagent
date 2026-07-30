@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/WWTLF/mycodeagent/cmd/mycodeagent/commands"
 	"github.com/WWTLF/mycodeagent/internal/application"
@@ -17,6 +20,14 @@ import (
 )
 
 func main() {
+	// Ctrl-C must cancel the command's context rather than kill the process:
+	// `init` holds a billing GPU for up to 15 minutes, and only a cancelled
+	// context lets DeployService run its teardown. NotifyContext restores the
+	// default handler after the first signal, so a second Ctrl-C still force
+	// quits — at the cost of leaving the instance running.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
@@ -81,7 +92,7 @@ func main() {
 		commands.NewHostsCmd(app),
 	)
 
-	if err := rootCmd.Execute(); err != nil {
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

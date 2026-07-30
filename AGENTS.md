@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-`mycodeagent` is a Go CLI tool that deploys and manages vLLM-based coding/writing models on [vast.ai](https://vast.ai). It abstracts the vast.ai API, vLLM startup, SSH tunnel management, and lifecycle operations. Instances are disposable (pay-as-you-go) — there are no persistent volumes.
+`mycodeagent` is a Go CLI tool that deploys and manages llama.cpp-based coding models on [vast.ai](https://vast.ai). It abstracts the vast.ai API, `llama-server` startup, SSH tunnel management, and lifecycle operations. Instances are disposable (pay-as-you-go) — there are no persistent volumes.
 
 ## Layer Architecture
 
@@ -52,16 +52,50 @@ make clean              # rm -f mycodeagent
 
 ## Testing
 
-**There are currently no `*_test.go` files in this repository.**
-
-When adding tests:
 ```bash
-go test ./...                          # run all tests
-go test -v ./internal/domain/...       # run domain package tests only
-go test -run TestDeployService/Deploy  # run single test with pattern
-go test -count=1 ./...                 # remove parallelization artifacts
-go test -race ./...                    # race detection
+go test ./...                              # run all tests
+go test -v ./internal/infrastructure/...   # run one package tree
+go test -run TestServeArgs ./...           # single test by pattern
+go test -count=1 ./...                     # bypass the test cache
+go test -race ./...                        # race detection
 ```
+
+Tests are a *contract* suite, not a coverage exercise — each case locks in a property
+whose regression would only surface as money quietly leaking on vast.ai.
+
+`internal/domain/service/` — `fakes_test.go` provides in-memory doubles for every
+provider and repository, so the failure paths (which only run when something has
+already gone wrong, and so are never exercised by hand) are testable:
+
+| Test | Property locked in |
+|---|---|
+| `TestDeployCleansUpLocalRowWhenHealthCheckFails` | a failed deploy leaves no instance, no tunnel **and no DB row** |
+| `TestDeployDestroysInstanceOnContextCancel` | Ctrl-C tears the billing instance down instead of orphaning it |
+| `TestDeployCleansUpWhenInstanceNeverStarts` | teardown before the row exists doesn't try to delete row 0 |
+| `TestDeploySuccessKeepsInstanceAndPersistsRuntimeShape` | the happy path destroys nothing; scaled context + GPU count are persisted |
+| `TestRestartReusesPersistedContextLength` | restart re-emits the deployed window, not the catalog baseline |
+| `TestSyncDedupeKeepsTheRowWithTheTunnel` | dedupe keeps exactly one row — never deletes its own winner |
+| `TestSyncDropsRowsWhoseRemoteIsGone` | stale rows are removed and their tunnels killed |
+| `TestGetBudgetCountsStatusesCarryingADetailSuffix` | `"running (msg)"` still counts toward the totals |
+
+`internal/infrastructure/engine/llamacpp_test.go`:
+
+| Test | Property locked in |
+|---|---|
+| `TestServeArgsInjectsRuntimeValues` | `-hf` / `--alias` / `--host` / `--port` / `-ngl` / `--ctx-size` are all emitted |
+| `TestServeArgsOmitsQuantWhenUnset` | bare repo ref when `Quant == ""`; no `--ctx-size` when context is 0 |
+| `TestServeArgsStripsEngineOwnedFlagsFromCatalog` | a catalog row cannot hijack an engine-owned flag |
+| `TestServeArgsSplitMode` | `--split-mode layer` only for multi-GPU, and never on top of a catalog `-sm` |
+| `TestBuildOnstartShapeSupportsRestartRewrite` | the `" && bash "` separator `Restart` splits on stays intact |
+| `TestBuildOnstartEscapesSingleQuotes` | catalog args with `'` survive the `echo '...'` wrapper byte-for-byte |
+| `TestProcessCommandsAvoidProcpsAndSelfMatch` | no `pgrep`/`pkill` (absent from the image); the `llama-serve[r]` pattern never self-matches |
+
+When adding a test here, check it has teeth: reintroduce the bug it targets and
+confirm the test goes red. A test that passes against the broken code documents
+nothing.
+
+Untested and worth covering next: `EstablishTunnel`, the `vastai.Adapter` mapping
+layer, and `serverprobe`'s `/props` fallback.
 
 ## Code Style
 
@@ -123,13 +157,18 @@ base_port: 8000
 
 ## Operational Notes
 
-- **VLLM image:** `vllm/vllm-openai:v0.19.0` is the only engine image. All catalog models are AWQ/FP8 quants (never GGUF).
-- **HF_TOKEN:** Required only for gated models. The current catalog (Qwen, dolphin) is public.
-- **SSH tunnels:** Forward local ports to remote vLLM port 8000. Each `init` allocates a new local port for concurrency.
-- **Storage:** No persistent volumes. The HF cache lives on the ephemeral container disk (sized per model via `Model.DiskGB`) and is discarded on destroy.
-- **Disposable instances:** A failed `init` (crash or timeout) auto-destroys the vast.ai instance + tunnel so nothing keeps billing. A liveness watcher detects a dead `vllm serve` and fails fast.
-- **SSH/tunnel operations:** Shell out to `ssh` and manage lifecycle via process PID + TCP/HTTP checks
-- **Context usage:** Always pass a real `context.Context` (typically `context.WithTimeout` or `context.WithCancel`), never `&context.Context{}`
+- **Engine image:** `ghcr.io/ggml-org/llama.cpp:server-cuda-b<build>` is the only engine image, pinned in `engine/llamacpp.go`. All catalog models are GGUF quants pulled with `llama-server -hf <repo>:<quant>` (never AWQ/FP8).
+- **The image is a bare CUDA runtime** (`nvidia/cuda:12.8.1-runtime-ubuntu24.04` + `libgomp1 curl ffmpeg`). Two consequences that bite:
+  - **No procps.** Never write `pgrep`/`pkill`/`ps` into a remote command — scan `/proc/*/cmdline` instead, with the process name bracketed (`llama-serve[r]`) so the command cannot match its own shell.
+  - **`/app` is not on `PATH`.** The onstart script resolves the binary itself and `cd`s beside it (the CUDA build uses `GGML_BACKEND_DL`, so ggml backend `.so`s must be in the working directory).
+- **CUDA floor is tied to the image.** `SearchOffers` filters `cuda_max_good >= 12.8` because the image is CUDA 12.8.1. Bumping the image to a newer CUDA base means bumping that filter in `vastai/client.go`, or deploys land on hosts whose driver cannot run the runtime.
+- **Engine details stay behind `service.EngineProvider`.** A llama.cpp flag, process name, or log path anywhere outside `internal/infrastructure/engine/` is a layering violation.
+- **HF_TOKEN:** Required only for gated models. The current catalog (unsloth / mradermacher Qwen3.5 + Qwen3.6 quants) is public.
+- **SSH tunnels:** Forward local ports to the remote `llama-server` port 8000. Each `init` allocates a new local port for concurrency.
+- **Storage:** No persistent volumes. The GGUF cache lives on the ephemeral container disk (sized per model via `Model.DiskGB`) and is discarded on destroy.
+- **Disposable instances:** A failed `init` (crash or timeout) auto-destroys the vast.ai instance + tunnel so nothing keeps billing. A liveness watcher detects a dead `llama-server` and fails fast instead of waiting out the timeout.
+- **SSH/tunnel operations:** Shell out to `ssh` and manage lifecycle via process PID + TCP/HTTP checks.
+- **Context usage:** Always pass a real `context.Context` (typically `context.WithTimeout` or `context.WithCancel`), never `&context.Context{}`.
 
 ## Database Schema
 
@@ -147,7 +186,8 @@ Auto-migrated tables in SQLite:
 - **Repository implementations:** `internal/infrastructure/persistence/`
 - **vast.ai client:** `internal/infrastructure/vastai/client.go`
 - **SSH tunnel:** `internal/infrastructure/ssh/tunnel.go`
-- **Engine:** `internal/infrastructure/engine/vllm.go` (the only engine)
+- **Engine:** `internal/infrastructure/engine/llamacpp.go` (the only engine) + `llamacpp_test.go`
+- **Model catalog:** `internal/infrastructure/persistence/model_repo_static.go` (in-memory, no DB)
 - **Config loading:** `internal/infrastructure/config/config.go`
 
 ## Commands

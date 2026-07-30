@@ -25,7 +25,7 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 			// Filter to running instances
 			var runningInstances []*entity.Instance
 			for _, inst := range instances {
-				if strings.HasPrefix(string(inst.Status), "running") || strings.HasPrefix(string(inst.Status), "starting") {
+				if inst.Status.Is(entity.StatusRunning) || inst.Status.Is(entity.StatusStarting) {
 					runningInstances = append(runningInstances, inst)
 				}
 			}

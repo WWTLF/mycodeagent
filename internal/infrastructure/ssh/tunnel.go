@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -72,7 +73,9 @@ func StopTunnel(pid int) error {
 
 // WaitForSSH waits until SSH is reachable on the given host:port, respecting context deadline.
 func WaitForSSH(ctx context.Context, host string, port int) error {
-	addr := fmt.Sprintf("%s:%d", host, port)
+	// JoinHostPort, not Sprintf("%s:%d"): the latter produces an unusable address
+	// for an IPv6 literal (go vet flags it).
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -119,6 +122,10 @@ func WaitForServerHealth(ctx context.Context, localPort int) error {
 }
 
 // RunRemoteCommand executes a command on the remote instance via SSH.
+//
+// Deliberately silent: the liveness watcher calls this every 20s for the whole
+// startup, and echoing the command there buried the deploy progress output.
+// Callers that want the user to see the step print their own line.
 func RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error) {
 	cmd := exec.Command("ssh",
 		"-o", "StrictHostKeyChecking=no",
@@ -127,7 +134,6 @@ func RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, erro
 		fmt.Sprintf("root@%s", sshHost),
 		command,
 	)
-	fmt.Printf("[ssh] %s\n", cmd.String())
 	return cmd.CombinedOutput()
 }
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-`mycodeagent init <model>` deploys a model on a vast.ai GPU instance and exposes it as an OpenAI-compatible API on localhost. **llama.cpp is the only engine** (`ghcr.io/ggml-org/llama.cpp:server-cuda-*`); every catalog model is a GGUF quant fetched by `llama-server -hf <repo>:<quant>`. The entire startup is governed by a single `context.Context` with a per-model timeout (default 10 min; 8–12 min in the current catalog).
+`mycodeagent init <model>` deploys a model on a vast.ai GPU instance and exposes it as an OpenAI-compatible API on localhost. **llama.cpp is the only engine** (`ghcr.io/ggml-org/llama.cpp:server-cuda-*`); every catalog model is a GGUF quant fetched by `llama-server -hf <repo>:<quant>`. The entire startup is governed by a single `context.Context` with a per-model timeout (default 10 min; 8–15 min in the current catalog).
 
 **Why llama.cpp and not vLLM.** This is a single-user, pay-as-you-go environment with no concurrent load, and vLLM's advantages — continuous batching, PagedAttention scheduling — only pay off at concurrency ≫ 1. What it charges for instead is exactly what costs money here: a ~15 GB image pull on every disposable `init`, a minute or two of `torch.compile` + CUDA-graph capture, and FP8 weights too large for one card. Swapping to 4-bit GGUF put every catalog model back on a **single** GPU (see the table below), which roughly halves the hourly rate and widens the pool of usable offers. The tradeoffs accepted in exchange are documented under [Engine tradeoffs](#engine-tradeoffs).
 
@@ -331,6 +331,8 @@ The dense 27B's 136 KB/token is 3.2× the MoE's, which is the whole reason `code
 
 **Single GPU everywhere.** That is the right shape for llama.cpp: its multi-GPU default is a *layer* (pipeline) split, where only one card computes at a time, so a second GPU buys VRAM but almost no batch-1 speed. If a future model does need two, the engine emits `--split-mode layer` explicitly unless the catalog picked a mode itself.
 
+Note that `SearchOffers` filters `num_gpus` with **`eq`**, not `gte` — the rented offer always has exactly `model.NumGPUs` cards. So `offer.NumGPUs` can never exceed the catalog value, the `--split-mode` branch is currently unreachable (every entry is `NumGPUs: 1`), and only *VRAM per GPU* varies between the search filter and the rental. That is why `scaledContextLength` scales on `offer.GPUMemory` alone.
+
 ### vast.ai price ladder (measured, single GPU, same filters `init` uses)
 
 | Tier | Cheapest | Typical cards | vs 32 GB |
@@ -342,7 +344,7 @@ The dense 27B's 136 KB/token is 3.2× the MoE's, which is the whole reason `code
 | 64 GB | $0.876/hr | — nothing sits here — | 4.3× |
 | 80–96 GB | $0.876/hr | RTX PRO 6000 WS (96 GB), A100 | 4.3× |
 
-**There is no 64 GB tier**: the cheapest "≥64 GB" offer is a 96 GB RTX PRO 6000 WS at the same price as the 80 GB tier. The real ladder is 16 → 24 → 32 → 48 → 96. 48 GB is the only sensible next step (+90%) and would buy AgentWorld at `UD-Q6_K` with the full 262k window; after that the price jumps 4.3×.
+**There is no 64 GB tier**: the cheapest "≥64 GB" offer is a 96 GB RTX PRO 6000 WS at the same price as the 80 GB tier. The real ladder is 16 → 24 → 32 → 48 → 96. 48 GB is the only sensible next step (+90%) — that is exactly what `coder-max` rents, and it is the last step before the price jumps 4.3×.
 
 ### Why the frontier MoE models (GLM-5.2, Kimi-K3) are out of scope
 
@@ -485,16 +487,17 @@ Stripped aliases include both spellings of each: `-hf/-hfr/--hf-repo`, `-hff/--h
 |---|---|---|
 | `--jinja` | Chat + tool calling through the GGUF's own Jinja template. | Required for OpenAI-style `tool_calls`. Default is enabled in recent builds; set explicitly so a default flip can't silently break tool use. Quality depends on the publisher's template — unsloth's Qwen3 repos ship fixed ones, which is why they're preferred over generic mirrors. |
 | `-fa on` | Flash attention. | Also a **prerequisite for a quantized V cache**; `--cache-type-v` without it fails. Default is `auto`; pinned `on` so a fallback to `off` surfaces as a startup error rather than a silent memory blow-up. |
-| `--cache-type-k q8_0` / `--cache-type-v q8_0` | Quantize the KV cache (default `f16`). | Roughly halves KV memory, i.e. doubles the context that fits. Skipped on the 8k dolphin, where f16 KV is only ~1 GB. |
+| `--cache-type-k q8_0` / `--cache-type-v q8_0` | Quantize the KV cache (default `f16`). | Roughly halves KV memory, i.e. doubles the context that fits. Set on every catalog entry — the sizing arithmetic above assumes it. Dropping it to `f16` on any row doubles that row's KV and blows the VRAM budget. |
 | `-np 1` | One server slot. | **Important:** slots divide the context. With the default (`-1`, auto) a 64k window could be split into several smaller ones. One slot gives a single request the whole window — correct for single-user, at the cost of queueing parallel requests. |
 | `--cache-reuse 256` | Min chunk size for reusing cached KV via KV shifting. | Prompt caching is on by default; this adds reuse after a prefix diverges. Direct win for agent loops, where the system prompt and tool schema never change. |
-| `--reasoning-format deepseek` | Put `<think>…</think>` content in `message.reasoning_content`. | Set on the reasoning models. Without it the client sees raw `<think>` tokens in `content`. |
-| `--rope-scaling yarn` + `--rope-scale 4` + `--yarn-orig-ctx 32768` | YaRN context extension at load. | Used on Qwen3-8B and Qwen2.5-32B to go past native 32k. Note it stays active at the 32k baseline too, costing a little short-context quality — the same tradeoff the vLLM catalog made. |
+| `--reasoning-format deepseek` | Put `<think>…</think>` content in `message.reasoning_content`. | Set on every entry — all are reasoning models. Without it the client sees raw `<think>` tokens in `content`. |
+| `--no-mmproj` | Skip the vision projector `-hf` would otherwise auto-download. | Several of these repos ship a ~0.9 GB `mmproj` that would be downloaded and offloaded to VRAM. Everything is served text-only. To enable vision, drop this flag and set `Vision: true`. |
 
 ### Likely-needed for tuning (not currently set)
 
 | Flag | When to reach for it |
 |---|---|
+| `--rope-scaling yarn` + `--rope-scale N` + `--yarn-orig-ctx <native>` | YaRN context extension at load — **not needed by anything in the catalog** (Qwen3.5/3.6 are natively 262144). Only for a future model whose native window is shorter than the context you want; note YaRN stays active at the baseline too, costing a little short-context quality. |
 | `--no-fit-params` | llama.cpp auto-shrinks the context to fit VRAM. Disable to make an oversized `--ctx-size` fail loudly instead of quietly serving a smaller window. |
 | `-b` / `-ub <N>` | Batch / micro-batch size. Lower `-ub` cuts the compute buffer when a load is a few hundred MB short of fitting. |
 | `--n-cpu-moe <N>` | Keep N MoE expert layers in CPU RAM — lets a bigger quant of a 30B-A3B fit a smaller card, at a throughput cost. |

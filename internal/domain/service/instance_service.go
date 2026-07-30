@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/WWTLF/mycodeagent/internal/domain/entity"
@@ -277,25 +276,33 @@ func (s *InstanceService) Sync(ctx context.Context) ([]*entity.Instance, error) 
 		return nil, fmt.Errorf("read local instances: %w", err)
 	}
 
-	// Deduplicate local rows pointing at the same vast.ai instance. Prefer
-	// the row that has a real LocalPort over one without.
+	// Deduplicate local rows pointing at the same vast.ai instance, keeping the
+	// row that has a real LocalPort. Exactly one row per vast.ai id survives and
+	// every other row is deleted exactly once — the winner must never end up in
+	// the delete list, or the instance disappears from `ps` entirely and the
+	// update pass below writes to a row that no longer exists.
 	localByVastID := make(map[int64]*entity.Instance, len(localInstances))
-	dupes := make(map[int64][]int64)
+	var dupes []*entity.Instance
 	for _, li := range localInstances {
-		if existing, ok := localByVastID[li.VastaiID]; ok {
-			dupes[li.VastaiID] = append(dupes[li.VastaiID], li.ID)
-			if li.LocalPort > 0 && existing.LocalPort == 0 {
-				dupes[li.VastaiID] = append(dupes[li.VastaiID], existing.ID)
-				localByVastID[li.VastaiID] = li
-			}
+		existing, ok := localByVastID[li.VastaiID]
+		if !ok {
+			localByVastID[li.VastaiID] = li
 			continue
 		}
-		localByVastID[li.VastaiID] = li
-	}
-	for _, ids := range dupes {
-		for _, id := range ids {
-			_ = s.instances.Delete(id)
+		keep, drop := existing, li
+		if li.LocalPort > 0 && existing.LocalPort == 0 {
+			keep, drop = li, existing
 		}
+		localByVastID[li.VastaiID] = keep
+		dupes = append(dupes, drop)
+	}
+	for _, d := range dupes {
+		// The row is going away, so nothing will ever reference its tunnel PID
+		// again — kill it rather than leaking the ssh process.
+		if d.TunnelPID > 0 && d.TunnelPID != localByVastID[d.VastaiID].TunnelPID {
+			_ = s.ssh.StopTunnel(d.TunnelPID)
+		}
+		_ = s.instances.Delete(d.ID)
 	}
 
 	// Pre-load the static catalog once so detectModelFromOnstart doesn't
@@ -347,7 +354,9 @@ func (s *InstanceService) Sync(ctx context.Context) ([]*entity.Instance, error) 
 			continue
 		}
 		if li.TunnelPID > 0 {
-			_ = syscall.Kill(li.TunnelPID, syscall.SIGTERM)
+			// Via the provider, not syscall directly — the domain layer must not
+			// reach for OS primitives it has an interface for.
+			_ = s.ssh.StopTunnel(li.TunnelPID)
 		}
 		if err := s.instances.Delete(li.ID); err != nil {
 			fmt.Printf("delete stale instance %d: %v\n", li.ID, err)
@@ -395,7 +404,10 @@ func (s *InstanceService) GetBudget(ctx context.Context) (*BudgetSummary, error)
 
 	for _, inst := range instances {
 		hours := time.Since(inst.CreatedAt).Hours()
-		if inst.Status == entity.StatusStopped {
+		// Status.Is, not ==: Sync records a vast.ai status_msg as a " (detail)"
+		// suffix, so an exact match drops "running (loading)" out of the totals
+		// and keeps billing "stopped (…)" rows as if they were live.
+		if inst.Status.Is(entity.StatusStopped) {
 			hours = 0
 		}
 		cost := inst.HourlyRate * hours
@@ -409,7 +421,7 @@ func (s *InstanceService) GetBudget(ctx context.Context) (*BudgetSummary, error)
 			Cost:       cost,
 		})
 
-		if inst.Status == entity.StatusRunning {
+		if inst.Status.Is(entity.StatusRunning) {
 			activeInstances = append(activeInstances, inst)
 			totalHourlyRate += inst.HourlyRate
 		}

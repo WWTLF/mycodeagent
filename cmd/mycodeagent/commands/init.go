@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
@@ -16,8 +15,13 @@ func NewInitCmd(app *application.App) *cobra.Command {
 		Short: "Deploy a model on vast.ai (--create-instance-only)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// cmd.Context() carries the SIGINT cancellation wired in main.go —
+			// Ctrl-C during a deploy must tear the paid instance down, not just
+			// kill this process.
+			ctx := cmd.Context()
+
 			if createOnly {
-				result, err := app.DeployCreateOnly(context.Background(), args[0])
+				result, err := app.DeployCreateOnly(ctx, args[0])
 				if err != nil {
 					return err
 				}
@@ -45,7 +49,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 				return nil
 			}
 
-			_, err := app.Deploy(context.Background(), args[0])
+			_, err := app.Deploy(ctx, args[0])
 			return err
 		},
 	}

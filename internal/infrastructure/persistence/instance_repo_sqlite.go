@@ -11,7 +11,7 @@ import (
 // instanceColumns is the explicit projection used by every read. Listing columns
 // (instead of SELECT *) keeps the code working on older DBs that still carry the
 // now-removed volume_id / volume_name columns.
-const instanceColumns = "id, vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, created_at, num_gpus"
+const instanceColumns = "id, vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, created_at, num_gpus, context_length"
 
 type SQLiteInstanceRepository struct {
 	db *sql.DB
@@ -25,10 +25,10 @@ func NewSQLiteInstanceRepository(db *sql.DB) *SQLiteInstanceRepository {
 
 func (r *SQLiteInstanceRepository) Save(inst *entity.Instance) error {
 	result, err := r.db.Exec(
-		`INSERT INTO instances (vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, num_gpus)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO instances (vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, num_gpus, context_length)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inst.VastaiID, inst.ModelName, inst.Status, inst.LocalPort,
-		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs,
+		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs, inst.ContextLength,
 	)
 	if err != nil {
 		return err
@@ -60,9 +60,9 @@ func (r *SQLiteInstanceRepository) FindRunning() ([]*entity.Instance, error) {
 func (r *SQLiteInstanceRepository) Update(inst *entity.Instance) error {
 	_, err := r.db.Exec(
 		`UPDATE instances SET vastai_id=?, model_name=?, status=?, local_port=?,
-		 ssh_host=?, ssh_port=?, tunnel_pid=?, hourly_rate=?, num_gpus=? WHERE id=?`,
+		 ssh_host=?, ssh_port=?, tunnel_pid=?, hourly_rate=?, num_gpus=?, context_length=? WHERE id=?`,
 		inst.VastaiID, inst.ModelName, inst.Status, inst.LocalPort,
-		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs, inst.ID,
+		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs, inst.ContextLength, inst.ID,
 	)
 	return err
 }
@@ -108,7 +108,7 @@ func scanInstance(row scannable) (*entity.Instance, error) {
 	err := row.Scan(
 		&inst.ID, &inst.VastaiID, &inst.ModelName, &inst.Status,
 		&inst.LocalPort, &inst.SSHHost, &inst.SSHPort, &inst.TunnelPID,
-		&inst.HourlyRate, &inst.CreatedAt, &inst.NumGPUs,
+		&inst.HourlyRate, &inst.CreatedAt, &inst.NumGPUs, &inst.ContextLength,
 	)
 	return &inst, err
 }
