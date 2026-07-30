@@ -80,6 +80,12 @@ type OfferResult struct {
 // defaultDiskGB is the container disk requested when a model doesn't specify one.
 const defaultDiskGB = 40
 
+// defaultStartupTimeout applies to a model with no StartupTimeout of its own.
+// Sized like the catalog entries (see model_repo_static.go): the provisioning
+// phase alone has been measured at 9.3 minutes on a slow host, so anything under
+// ~15 minutes can fail before the model server is even reached.
+const defaultStartupTimeout = 20 * time.Minute
+
 // diskHeadroomGB is added to a model's disk request when filtering host offers:
 // the llama.cpp server-cuda image is ~2.6 GB compressed / ~6 GB unpacked, and the
 // host needs room for both plus scratch on top of the GGUF download.
@@ -215,7 +221,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 
 	timeout := model.StartupTimeout
 	if timeout <= 0 {
-		timeout = 10 * time.Minute
+		timeout = defaultStartupTimeout
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -436,7 +442,7 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string) 
 
 	timeout := model.StartupTimeout
 	if timeout <= 0 {
-		timeout = 10 * time.Minute
+		timeout = defaultStartupTimeout
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -513,7 +519,7 @@ func (s *DeployService) Start(ctx context.Context, id int64) error {
 
 	// The startup budget comes from the model when it's still in the catalog; a
 	// row referencing a removed model still has to be startable.
-	timeout := 10 * time.Minute
+	timeout := defaultStartupTimeout
 	if model, err := s.models.FindByName(inst.ModelName); err == nil && model.StartupTimeout > 0 {
 		timeout = model.StartupTimeout
 	}

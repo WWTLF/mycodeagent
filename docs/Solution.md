@@ -2,7 +2,7 @@
 
 ## Overview
 
-`mycodeagent init <model>` deploys a model on a vast.ai GPU instance and exposes it as an OpenAI-compatible API on localhost. **llama.cpp is the only engine** (`ghcr.io/ggml-org/llama.cpp:server-cuda-*`); every catalog model is a GGUF quant fetched by `llama-server -hf <repo>:<quant>`. The entire startup is governed by a single `context.Context` with a per-model timeout (default 10 min; 8–15 min in the current catalog).
+`mycodeagent init <model>` deploys a model on a vast.ai GPU instance and exposes it as an OpenAI-compatible API on localhost. **llama.cpp is the only engine** (`ghcr.io/ggml-org/llama.cpp:server-cuda-*`); every catalog model is a GGUF quant fetched by `llama-server -hf <repo>:<quant>`. The entire startup is governed by a single `context.Context` with a per-model timeout (default 20 min; 16–30 min in the current catalog).
 
 **Why llama.cpp and not vLLM.** This is a single-user, pay-as-you-go environment with no concurrent load, and vLLM's advantages — continuous batching, PagedAttention scheduling — only pay off at concurrency ≫ 1. What it charges for instead is exactly what costs money here: a ~15 GB image pull on every disposable `init`, a minute or two of `torch.compile` + CUDA-graph capture, and FP8 weights too large for one card. Swapping to 4-bit GGUF put every catalog model back on a **single** GPU (see the table below), which roughly halves the hourly rate and widens the pool of usable offers. The tradeoffs accepted in exchange are documented under [Engine tradeoffs](#engine-tradeoffs).
 
@@ -275,14 +275,28 @@ The catalog spans four VRAM tiers — **16 / 24 / 32 / 48 GB** — plus a speed-
 
 | Tier | Model | Alias | Repo | Quant | Weights | Active | Disk | Context | Timeout |
 |---|---|---|---|---|---|---|---|---|---|
-| 16 GB | `qwen35-9b` | `coder-mini` | unsloth/Qwen3.5-9B-GGUF | UD-Q5_K_XL | 6.7 GB | 9B | 20 GB | 64k | 8 min |
-| 24 GB | `qwen36-27b-24g` | `coder` | unsloth/Qwen3.6-27B-GGUF | IQ4_XS | 15.4 GB | 27B | 28 GB | 32k | 12 min |
-| 24 GB | `qwen36-35b-a3b` | `coder-fast` | unsloth/Qwen3.6-35B-A3B-GGUF | UD-IQ4_XS | 17.7 GB | **3B** | 32 GB | 64k | 12 min |
-| 32 GB | `qwen36-27b-32g` | `coder-hq` | unsloth/Qwen3.6-27B-GGUF | Q5_K_M | 19.5 GB | 27B | 32 GB | 64k | 12 min |
-| 48 GB | `qwen36-27b-48g` | `coder-max` | unsloth/Qwen3.6-27B-GGUF | UD-Q6_K_XL | 25.6 GB | 27B | 38 GB | **128k** | 15 min |
-| 32 GB | `qwen36-35b-a3b-abliterated` | `rude` | mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF | Q4_K_M | 21.2 GB | **3B** | 34 GB | **128k** | 14 min |
+| 16 GB | `qwen35-9b` | `coder-mini` | unsloth/Qwen3.5-9B-GGUF | UD-Q5_K_XL | 6.7 GB | 9B | 20 GB | 64k | 16 min |
+| 24 GB | `qwen36-27b-24g` | `coder` | unsloth/Qwen3.6-27B-GGUF | IQ4_XS | 15.4 GB | 27B | 28 GB | 32k | 22 min |
+| 24 GB | `qwen36-35b-a3b` | `coder-fast` | unsloth/Qwen3.6-35B-A3B-GGUF | UD-IQ4_XS | 17.7 GB | **3B** | 32 GB | 64k | 24 min |
+| 32 GB | `qwen36-27b-32g` | `coder-hq` | unsloth/Qwen3.6-27B-GGUF | Q5_K_M | 19.5 GB | 27B | 32 GB | 64k | 26 min |
+| 48 GB | `qwen36-27b-48g` | `coder-max` | unsloth/Qwen3.6-27B-GGUF | UD-Q6_K_XL | 25.6 GB | 27B | 38 GB | **128k** | 30 min |
+| 32 GB | `qwen36-35b-a3b-abliterated` | `rude` | mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF | Q4_K_M | 21.2 GB | **3B** | 34 GB | **128k** | 26 min |
 
-`MaxContextLength` is 262144 (native) on every entry, so `scaledContextLength` grows the window whenever the rented offer has more per-GPU VRAM than the tier baseline. If `StartupTimeout` is unset the default is **10 minutes**.
+`MaxContextLength` is 262144 (native) on every entry, so `scaledContextLength` grows the window whenever the rented offer has more per-GPU VRAM than the tier baseline. If `StartupTimeout` is unset the default is **20 minutes**.
+
+#### Where the timeout numbers come from
+
+One context covers the whole deploy — provisioning, SSH, download and weight load all draw on the same deadline — so the budget has to survive the worst case of each phase, not the typical one:
+
+```
+timeout = 10 min provisioning + (size / 25 MB/s) + 1 min VRAM load
+```
+
+Both constants are measured. **Provisioning** (offer accepted → `actual_status: running`) is the host pulling and unpacking the image; it took **9.3 minutes** on a slow host and seconds on a good one, and nothing in this tool can influence it. **25 MB/s** is a deliberately pessimistic download rate: 43 MB/s was observed on a healthy host, and halving it leaves room for a bad one.
+
+Erring generous is close to free. A doomed deploy burns pennies of GPU time before the timeout fires, a genuinely *dead* server is caught within seconds by the liveness watcher regardless of the deadline, and the instance self-destroys either way. Erring stingy costs the entire deploy. The original 8–15 minute values could not even cover the provisioning phase alone on a slow host — a `rude` deploy died with ~11.5 of its 14 minutes spent before `llama-server` had read a single byte of the GGUF.
+
+**Known gap.** That failure is recorded as *model-side* (the health check timed out), so `markHostBad` is not called and the slow machine stays in the offer pool. The rule is right in general — blaming the host for a model-side crash would eventually blacklist every good machine — but it does not cover "host is healthy, just pathologically slow". Distinguishing them would mean tracking how long `WaitForInstance` took, or noticing that the deadline expired while the server had never bound its port and the download had never started.
 
 ### The selection criterion: capability first
 

@@ -43,6 +43,24 @@ import (
 // enable vision, drop the flag and set Vision: true.
 //
 // No YaRN anywhere: Qwen3.5 and Qwen3.6 are natively 262144 context.
+//
+// StartupTimeout budget. One context covers the WHOLE deploy — provisioning,
+// SSH, download and weight load all draw on it — so the number has to survive
+// the worst case of each, not the typical case:
+//
+//	timeout = 10 min provisioning + (size / 25 MB/s) + 1 min VRAM load
+//
+// Both constants are measured, not guessed. Provisioning (offer accepted →
+// actual_status "running") took 9.3 minutes on a slow host and seconds on a good
+// one; it is the host's image pull, and nothing here can speed it up. 25 MB/s is
+// a deliberately pessimistic download rate — 43 MB/s was observed on a healthy
+// host, and halving it leaves room for a bad one.
+//
+// Being generous costs almost nothing: a doomed deploy burns pennies of GPU time
+// before the timeout fires, a *dead* server is caught in seconds by the liveness
+// watcher regardless, and the instance self-destroys either way. Being stingy
+// costs a whole deploy. The original 8-15 min values could not even cover the
+// provisioning phase alone on a slow host.
 var defaultModels = []*entity.Model{
 	{
 		// 16 GB. Dense 9B is the largest dense model that fits with real context;
@@ -55,7 +73,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             16,
 		NumGPUs:          1,
 		DiskGB:           20,
-		StartupTimeout:   8 * time.Minute,
+		StartupTimeout:   16 * time.Minute,
 		ContextLength:    65536, // 6.7 + 4.5 KV + 1.5 = 12.7 of ~15.4
 		MaxContextLength: 262144,
 		LlamaArgs: []string{
@@ -83,7 +101,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             24,
 		NumGPUs:          1,
 		DiskGB:           28,
-		StartupTimeout:   12 * time.Minute,
+		StartupTimeout:   22 * time.Minute,
 		ContextLength:    32768, // 15.4 + 4.5 KV + 1.5 = 21.4 of ~23.4
 		MaxContextLength: 262144,
 		LlamaArgs: []string{
@@ -112,7 +130,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             24,
 		NumGPUs:          1,
 		DiskGB:           32,
-		StartupTimeout:   12 * time.Minute,
+		StartupTimeout:   24 * time.Minute,
 		ContextLength:    65536, // 17.7 + 2.8 KV + 1.5 = 22.0 of ~23.4
 		MaxContextLength: 262144,
 		LlamaArgs: []string{
@@ -140,7 +158,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             32,
 		NumGPUs:          1,
 		DiskGB:           32,
-		StartupTimeout:   12 * time.Minute,
+		StartupTimeout:   26 * time.Minute,
 		ContextLength:    65536, // 19.5 + 8.9 KV + 1.5 = 29.9 of ~31.4
 		MaxContextLength: 262144,
 		LlamaArgs: []string{
@@ -170,7 +188,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             48,
 		NumGPUs:          1,
 		DiskGB:           38,
-		StartupTimeout:   15 * time.Minute,
+		StartupTimeout:   30 * time.Minute,
 		ContextLength:    131072, // 25.6 + 17.8 KV + 1.5 = 44.9 of ~47.4
 		MaxContextLength: 262144,
 		LlamaArgs: []string{
@@ -199,7 +217,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             32,
 		NumGPUs:          1,
 		DiskGB:           34,
-		StartupTimeout:   14 * time.Minute,
+		StartupTimeout:   26 * time.Minute,
 		ContextLength:    131072, // 21.2 + 5.5 KV + 1.5 = 28.2 of ~31.4
 		MaxContextLength: 262144,
 		LlamaArgs: []string{

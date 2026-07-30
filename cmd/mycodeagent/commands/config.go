@@ -160,7 +160,14 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 				fmt.Printf("  %s: %s → %s\n", providerName, modelID, baseURL)
 			}
 
-			cfg["provider"] = providers
+			// Drop the key entirely rather than leaving `"provider": {}` behind:
+			// once our last instance is gone there is nothing left to declare, and
+			// an empty object is noise in a file the user also edits by hand.
+			if len(providers) == 0 {
+				delete(cfg, "provider")
+			} else {
+				cfg["provider"] = providers
+			}
 
 			existingDefault, _ := cfg["model"].(string)
 			if chosen, keep := chooseDefaultModel(existingDefault, defaultModel, providers); keep {
