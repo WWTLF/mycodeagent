@@ -196,6 +196,7 @@ type fakeVastai struct {
 	createdID int
 	createErr error
 	waitErr   error
+	waitDelay time.Duration // simulated provisioning time
 
 	destroyed  []int
 	destroyErr error
@@ -216,6 +217,13 @@ func (v *fakeVastai) CreateInstance(offerID int, image string, env map[string]st
 	return v.createdID, nil
 }
 func (v *fakeVastai) WaitForInstance(ctx context.Context, id int) (string, int, float64, error) {
+	if v.waitDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return "", 0, 0, ctx.Err()
+		case <-time.After(v.waitDelay):
+		}
+	}
 	if v.waitErr != nil {
 		return "", 0, 0, v.waitErr
 	}

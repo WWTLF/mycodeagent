@@ -86,6 +86,32 @@ const defaultDiskGB = 40
 // ~15 minutes can fail before the model server is even reached.
 const defaultStartupTimeout = 20 * time.Minute
 
+// slowProvisionThreshold is how long the *host* may take to bring an instance to
+// "running" before it counts as evidence against that host.
+//
+// Provisioning is the host pulling and unpacking the image. It is the one phase
+// no model, quant or flag can influence, which is what makes it usable as
+// evidence even when the deploy failed later for a reason that looks model-side.
+// Healthy hosts finish in seconds to about a minute; the machine that motivated
+// this took 9.3 minutes, then ran llama-server so slowly it never started the
+// download. The budget in model_repo_static.go tolerates up to 10 minutes here,
+// so anything past half of that is already an outlier.
+// A variable, like the watcher cadence below, so a test can drive the positive
+// path without sleeping for minutes.
+var slowProvisionThreshold = 5 * time.Minute
+
+// blameHostForTimeout decides whether a startup timeout is the host's fault.
+//
+// Kept separate from markHostBad, and pure, because the judgement is the risky
+// part: blaming a host wrongly removes a good machine from the offer pool, and
+// doing that systematically ends in "no offers found". A timeout alone is not
+// enough — a legitimately slow download looks identical — so the deciding
+// evidence is that the host had already burned an outlier amount of the budget
+// before the model was even reached.
+func blameHostForTimeout(provisioning time.Duration) bool {
+	return provisioning > slowProvisionThreshold
+}
+
 // diskHeadroomGB is added to a model's disk request when filtering host offers:
 // the llama.cpp server-cuda image is ~2.6 GB compressed / ~6 GB unpacked, and the
 // host needs room for both plus scratch on top of the GGUF download.
@@ -149,6 +175,26 @@ func (s *DeployService) markHostBad(machineID int, reason string) {
 		return
 	}
 	fmt.Printf("Recorded machine %d as bad host (%s)\n", machineID, reason)
+}
+
+// Liveness watcher cadence. Variables rather than constants purely so tests can
+// shrink them: the crash path is otherwise unreachable in under two minutes, and
+// it guards the rule that a model-side crash must never blacklist a host.
+var (
+	// livenessGracePeriod gives the onstart script time to write itself and
+	// exec the server before a missing process counts as a crash.
+	livenessGracePeriod = 90 * time.Second
+	livenessInterval    = 20 * time.Second
+)
+
+// blameHostIfSlowToProvision records the host only when a startup timeout is
+// attributable to it. Called from the timeout paths, never from the crash path.
+func (s *DeployService) blameHostIfSlowToProvision(machineID int, provisioning time.Duration) {
+	if !blameHostForTimeout(provisioning) {
+		return
+	}
+	s.markHostBad(machineID, fmt.Sprintf(
+		"startup timed out; host spent %s just provisioning", provisioning.Round(time.Second)))
 }
 
 // filterBadHosts drops offers whose MachineID is marked bad. Returns the full
@@ -295,13 +341,18 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 	}()
 
 	fmt.Println("Waiting for instance to start...")
+	provisionStart := time.Now()
 	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
 	if err != nil {
 		// Instance never reached running → host-side problem, blacklist it.
 		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for instance: %v", err))
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
-	fmt.Printf("Instance running: SSH at %s:%d\n", sshHost, sshPort)
+	// How long the host took to pull and unpack the image. Retained because a
+	// timeout later on may still be this host's fault — see blameHostForTimeout.
+	provisioning := time.Since(provisionStart)
+	fmt.Printf("Instance running: SSH at %s:%d (provisioned in %s)\n",
+		sshHost, sshPort, provisioning.Round(time.Second))
 
 	fmt.Println("Waiting for SSH...")
 	if err := s.ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
@@ -351,10 +402,15 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 	select {
 	case healthErr := <-healthCh:
 		if healthErr != nil {
-			// Model-side failure — do NOT blacklist the host.
+			// The health poll only ever fails by running out of time, so this is
+			// the same situation as ctx.Done below.
+			s.blameHostIfSlowToProvision(offer.MachineID, provisioning)
 			return nil, fmt.Errorf("model server health check: %w", healthErr)
 		}
 	case crashErr := <-failCh:
+		// The server process died. That is the model's doing — a bad quant, a
+		// flag the build rejects, not enough VRAM — and blaming the host here
+		// would slowly blacklist every good machine.
 		return nil, fmt.Errorf("model server crashed during startup: %w", crashErr)
 	case <-ctx.Done():
 		// Distinguish "we ran out of time" from "the user pressed Ctrl-C" —
@@ -362,6 +418,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return nil, fmt.Errorf("startup interrupted")
 		}
+		s.blameHostIfSlowToProvision(offer.MachineID, provisioning)
 		return nil, fmt.Errorf("startup timed out after %s", timeout)
 	}
 
@@ -380,10 +437,10 @@ func (s *DeployService) watchServerProcess(ctx context.Context, sshHost string, 
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(90 * time.Second):
+	case <-time.After(livenessGracePeriod):
 	}
 
-	ticker := time.NewTicker(20 * time.Second)
+	ticker := time.NewTicker(livenessInterval)
 	defer ticker.Stop()
 
 	liveness := s.engine.LivenessCommand()

@@ -174,6 +174,128 @@ func TestRestartReusesPersistedContextLength(t *testing.T) {
 	}
 }
 
+// A timeout is charged to the host only when the host had already burned an
+// outlier share of the budget before the model was reached. Provisioning is the
+// one phase no model can influence, which is what makes it admissible evidence.
+func TestBlameHostForTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		provisioning time.Duration
+		want         bool
+	}{
+		{"healthy host, seconds", 12 * time.Second, false},
+		{"unremarkable", 2 * time.Minute, false},
+		{"right at the threshold", slowProvisionThreshold, false},
+		{"over the threshold", slowProvisionThreshold + time.Second, true},
+		{"the machine that motivated this", 9*time.Minute + 18*time.Second, true},
+	} {
+		if got := blameHostForTimeout(tc.provisioning); got != tc.want {
+			t.Errorf("%s: blameHostForTimeout(%s) = %v, want %v",
+				tc.name, tc.provisioning, got, tc.want)
+		}
+	}
+}
+
+// A crashed server is the model's fault — a bad quant, a rejected flag, too
+// little VRAM. Blaming the host for it is how a misconfigured catalog entry
+// would blacklist every good machine one deploy at a time, ending in
+// "no offers found". This must hold no matter how slow the host was.
+func TestDeployNeverBlamesHostForACrash(t *testing.T) {
+	// Shrink the watcher so the crash path is reachable; the real 90s grace plus
+	// two 20s reads would make this a two-minute test.
+	defer withFastLivenessWatcher()()
+
+	repo := newFakeInstanceRepo()
+	badHosts := newFakeBadHostRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+	// Liveness reports DEAD, so the watcher fires before the health poll can.
+	ssh := &fakeSSH{
+		tunnelPID:  1,
+		healthWait: time.Minute,
+		remoteOut:  map[string]string{"liveness": "DEAD"},
+	}
+	model := testDeployModel()
+	model.StartupTimeout = 5 * time.Second // room for the watcher to reach 2 reads
+	svc := NewDeployService(
+		&fakeModelRepo{models: []*entity.Model{model}},
+		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
+	)
+
+	_, err := svc.Deploy(context.Background(), model.Name)
+	if err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	if len(badHosts.added) != 0 {
+		t.Errorf("a model-side crash blacklisted machine(s) %v — this is how the "+
+			"offer pool gets drained one good host at a time", badHosts.added)
+	}
+	if len(vast.destroyed) != 1 {
+		t.Errorf("crashed deploy did not destroy the instance: %v", vast.destroyed)
+	}
+	if !strings.Contains(err.Error(), "crashed") {
+		t.Errorf("expected the crash path, got a different failure: %v", err)
+	}
+}
+
+// The case that motivated the feature: the host was healthy but pathologically
+// slow, ate most of the budget provisioning, and the deploy died on the health
+// timeout. Before this, that failure was classified model-side, so the machine
+// stayed in the offer pool and the next deploy could pick it straight back up.
+func TestDeployBlamesHostThatAteTheBudgetProvisioning(t *testing.T) {
+	restore := slowProvisionThreshold
+	slowProvisionThreshold = 20 * time.Millisecond
+	defer func() { slowProvisionThreshold = restore }()
+
+	repo := newFakeInstanceRepo()
+	badHosts := newFakeBadHostRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242, waitDelay: 60 * time.Millisecond}
+	ssh := &fakeSSH{tunnelPID: 1, healthErr: context.DeadlineExceeded}
+	model := testDeployModel()
+	svc := NewDeployService(
+		&fakeModelRepo{models: []*entity.Model{model}},
+		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
+	)
+
+	if _, err := svc.Deploy(context.Background(), model.Name); err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	reason, blamed := badHosts.added[oneOffer()[0].MachineID]
+	if !blamed {
+		t.Fatalf("slow host was not blacklisted; recorded: %v", badHosts.added)
+	}
+	if !strings.Contains(reason, "provisioning") {
+		t.Errorf("blame reason does not name the evidence: %q", reason)
+	}
+}
+
+// The mirror image: a host that provisioned promptly is not blamed when the
+// deploy times out later — that is the model taking too long, not the machine.
+func TestDeployDoesNotBlameAPromptHostForATimeout(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	badHosts := newFakeBadHostRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242} // provisions instantly
+	ssh := &fakeSSH{tunnelPID: 1, healthErr: context.DeadlineExceeded}
+	model := testDeployModel()
+	svc := NewDeployService(
+		&fakeModelRepo{models: []*entity.Model{model}},
+		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
+	)
+
+	if _, err := svc.Deploy(context.Background(), model.Name); err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	if len(badHosts.added) != 0 {
+		t.Errorf("a prompt host was blacklisted for a slow model: %v", badHosts.added)
+	}
+}
+
+// withFastLivenessWatcher shrinks the watcher cadence and returns a restore func.
+func withFastLivenessWatcher() func() {
+	grace, interval := livenessGracePeriod, livenessInterval
+	livenessGracePeriod, livenessInterval = 10*time.Millisecond, 10*time.Millisecond
+	return func() { livenessGracePeriod, livenessInterval = grace, interval }
+}
+
 // Start must re-read the SSH host/port: vast.ai reassigns them on resume, so
 // reusing the stored ones would tunnel to whatever now occupies the old slot.
 func TestStartRefreshesSSHAndReopensTunnel(t *testing.T) {

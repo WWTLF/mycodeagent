@@ -296,7 +296,11 @@ Both constants are measured. **Provisioning** (offer accepted → `actual_status
 
 Erring generous is close to free. A doomed deploy burns pennies of GPU time before the timeout fires, a genuinely *dead* server is caught within seconds by the liveness watcher regardless of the deadline, and the instance self-destroys either way. Erring stingy costs the entire deploy. The original 8–15 minute values could not even cover the provisioning phase alone on a slow host — a `rude` deploy died with ~11.5 of its 14 minutes spent before `llama-server` had read a single byte of the GGUF.
 
-**Known gap.** That failure is recorded as *model-side* (the health check timed out), so `markHostBad` is not called and the slow machine stays in the offer pool. The rule is right in general — blaming the host for a model-side crash would eventually blacklist every good machine — but it does not cover "host is healthy, just pathologically slow". Distinguishing them would mean tracking how long `WaitForInstance` took, or noticing that the deadline expired while the server had never bound its port and the download had never started.
+**Slow hosts are now caught.** Such a failure surfaces as a health-check timeout, which the original rule classified as model-side — so the machine stayed in the offer pool and the next `init` could pick it straight back up. `Deploy` therefore times the provisioning phase and keeps the number: if a deploy later dies on the deadline **and** provisioning alone exceeded `slowProvisionThreshold` (5 min, half the budgeted allowance), the host is blacklisted.
+
+Provisioning duration is the right evidence because it is the one phase no model, quant or flag can influence — it is purely the host pulling and unpacking the image. That makes it admissible even though the failure surfaced later, in a phase where the model *could* be at fault.
+
+The crash path is deliberately excluded. A dead `llama-server` means a bad quant, a flag the build rejects, or not enough VRAM; blaming the host for that is exactly how a single misconfigured catalog entry would blacklist every good machine one deploy at a time until the search returns "no offers found". `TestDeployNeverBlamesHostForACrash` locks that in, and `TestDeployDoesNotBlameAPromptHostForATimeout` guards the other direction — a host that provisioned promptly is never blamed for a model that simply needed longer.
 
 ### The selection criterion: capability first
 
@@ -437,7 +441,9 @@ A failed `init` must never leave a paid GPU running. After `CreateInstance` succ
 
 **Liveness watcher (fail fast).** The health check only polls `GET /v1/models`, which can't tell "still downloading" from "crashed". Alongside it, `watchServerProcess` SSHes every 20 s (after a 90 s grace) and runs `engine.LivenessCommand()` — a `/proc/*/cmdline` scan, because the image has no procps. Two consecutive "dead" reads abort the deploy with the tail of `engine.LogPath()` (`/tmp/llama.log`), instead of waiting out the full timeout. The two-read requirement avoids false positives during a brief re-exec.
 
-**Host blacklisting is host-side only.** `markHostBad` records a machine in `bad_hosts` (auto-skipped on future searches) **only** when the instance never reached running or SSH never came up. A model-side failure (server crash, health timeout) does *not* blame the host — otherwise a misconfigured model would slowly blacklist every good machine until "no offers found".
+**Host blacklisting needs host-side evidence.** `markHostBad` records a machine in `bad_hosts` (auto-skipped on future searches) when the instance never reached running or SSH never came up — and, additionally, when a startup **timeout** follows a provisioning phase that alone ran past `slowProvisionThreshold` (5 min). Provisioning time is admissible evidence because no model can influence it; see [Where the timeout numbers come from](#where-the-timeout-numbers-come-from).
+
+A server **crash** never blames the host, no matter how slow it was. That failure means a bad quant, a rejected flag or insufficient VRAM, and charging it to the machine is how one misconfigured catalog entry would blacklist every good host until the search returns "no offers found".
 
 ## Health Check
 
