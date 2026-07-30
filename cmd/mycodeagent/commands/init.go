@@ -2,26 +2,85 @@ package commands
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
 	"github.com/spf13/cobra"
 )
 
+// countryHelp lists the codes worth knowing. It is not the ISO table — it is the
+// set that actually had rentable offers when this was written, because a code
+// with no machines behind it is just a way to get "no offers found".
+const countryHelp = `Restrict the offer search to these countries (ISO-3166 alpha-2, comma-separated).
+
+Offers are otherwise picked purely by price, which is how three deploys in a row
+landed in a region whose route to HuggingFace ran at ~1 MB/s.
+
+  Americas   US CA
+  Europe     NO DK FR DE NL BE ES PL CZ HU RO UA TR
+  Asia       KR JP HK TW CN VN TH
+  Oceania    NZ
+
+Codes are matched case-insensitively. Examples:
+
+  --country FR,DE,NO      rent in western Europe
+  --country US            United States only
+
+Availability moves constantly; run 'mycodeagent models' to see live pricing, and
+expect a narrow filter to cost more or find nothing at all.`
+
+// parseCountries turns the raw flag into validated upper-case codes.
+//
+// Validating here rather than letting the API decide matters: vast.ai answers an
+// unknown code with an empty result set, which is indistinguishable from "your
+// filters are too tight" and sends you hunting for the wrong problem.
+func parseCountries(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		code := strings.ToUpper(strings.TrimSpace(part))
+		if code == "" {
+			continue
+		}
+		if len(code) != 2 || strings.Trim(code, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+			return nil, fmt.Errorf("invalid country code %q: expected two letters, e.g. US or DE", part)
+		}
+		if !seen[code] {
+			seen[code] = true
+			out = append(out, code)
+		}
+	}
+	return out, nil
+}
+
 func NewInitCmd(app *application.App) *cobra.Command {
 	var createOnly bool
+	var country string
 
 	cmd := &cobra.Command{
 		Use:   "init <model>",
-		Short: "Deploy a model on vast.ai (--create-instance-only)",
-		Args:  cobra.ExactArgs(1),
+		Short: "Deploy a model on vast.ai",
+		Long: "Rent a GPU, start llama-server and open an SSH tunnel.\n\n" +
+			"The instance is destroyed automatically if startup fails, so a broken\n" +
+			"deploy never leaves a paid GPU running.\n\n" +
+			countryHelp,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// cmd.Context() carries the SIGINT cancellation wired in main.go —
 			// Ctrl-C during a deploy must tear the paid instance down, not just
 			// kill this process.
 			ctx := cmd.Context()
 
+			countries, err := parseCountries(country)
+			if err != nil {
+				return err
+			}
+
 			if createOnly {
-				result, err := app.DeployCreateOnly(ctx, args[0])
+				result, err := app.DeployCreateOnly(ctx, args[0], countries)
 				if err != nil {
 					return err
 				}
@@ -49,12 +108,13 @@ func NewInitCmd(app *application.App) *cobra.Command {
 				return nil
 			}
 
-			_, err := app.Deploy(ctx, args[0])
+			_, err = app.Deploy(ctx, args[0], countries)
 			return err
 		},
 	}
 
 	cmd.Flags().BoolVar(&createOnly, "create-instance-only", false, "Create instance and show SSH details without setting up tunnel or waiting for the model server")
+	cmd.Flags().StringVar(&country, "country", "", "Comma-separated ISO-3166 alpha-2 country codes to rent in (see --help for the list)")
 
 	return cmd
 }

@@ -25,8 +25,8 @@ func (a *Adapter) SetVerbose(v bool) {
 	a.client.SetVerbose(v)
 }
 
-func (a *Adapter) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]service.OfferResult, error) {
-	offers, err := a.client.SearchOffers(minGPURAM, numGPUs, minDiskGB)
+func (a *Adapter) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int, countries []string) ([]service.OfferResult, error) {
+	offers, err := a.client.SearchOffers(minGPURAM, numGPUs, minDiskGB, countries)
 	if err != nil {
 		return nil, err
 	}

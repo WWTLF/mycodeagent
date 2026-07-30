@@ -75,12 +75,14 @@ func (app *App) HFToken() string { return app.hfToken }
 // Deploy lifecycle
 // ============================================================================
 
-func (app *App) Deploy(ctx context.Context, modelName string) (*entity.Instance, error) {
-	return app.DeploySvc.Deploy(ctx, modelName)
+// Deploy rents a GPU and brings the model up. countries, when non-empty,
+// restricts the offer search to those ISO-3166 alpha-2 codes.
+func (app *App) Deploy(ctx context.Context, modelName string, countries []string) (*entity.Instance, error) {
+	return app.DeploySvc.Deploy(ctx, modelName, countries)
 }
 
-func (app *App) DeployCreateOnly(ctx context.Context, modelName string) (*service.CreateOnlyResult, error) {
-	return app.DeploySvc.DeployCreateOnly(ctx, modelName)
+func (app *App) DeployCreateOnly(ctx context.Context, modelName string, countries []string) (*service.CreateOnlyResult, error) {
+	return app.DeploySvc.DeployCreateOnly(ctx, modelName, countries)
 }
 
 func (app *App) Stop(ctx context.Context, id int64) error {

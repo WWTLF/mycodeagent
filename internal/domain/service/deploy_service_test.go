@@ -51,7 +51,7 @@ func TestDeployCleansUpLocalRowWhenHealthCheckFails(t *testing.T) {
 
 	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
 
-	inst, err := svc.Deploy(context.Background(), "test-model")
+	inst, err := svc.Deploy(context.Background(), "test-model", nil)
 	if err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
@@ -84,7 +84,7 @@ func TestDeployDestroysInstanceOnContextCancel(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := svc.Deploy(ctx, "test-model")
+	_, err := svc.Deploy(ctx, "test-model", nil)
 	if err == nil {
 		t.Fatal("expected an error after cancellation")
 	}
@@ -107,7 +107,7 @@ func TestDeployCleansUpWhenInstanceNeverStarts(t *testing.T) {
 
 	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
 
-	if _, err := svc.Deploy(context.Background(), "test-model"); err == nil {
+	if _, err := svc.Deploy(context.Background(), "test-model", nil); err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
 	if repo.count() != 0 {
@@ -133,7 +133,7 @@ func TestDeploySuccessKeepsInstanceAndPersistsRuntimeShape(t *testing.T) {
 
 	svc, eng := newTestDeploy(testDeployModel(), vast, ssh, repo)
 
-	inst, err := svc.Deploy(context.Background(), "test-model")
+	inst, err := svc.Deploy(context.Background(), "test-model", nil)
 	if err != nil {
 		t.Fatalf("deploy failed: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestDeployDoesNotBlacklistOnUserCancel(t *testing.T) {
 				newFakeInstanceRepo(), badHosts, vast, &fakeSSH{}, &fakeEngine{}, 8000, "",
 			)
 
-			if _, err := svc.Deploy(context.Background(), model.Name); err == nil {
+			if _, err := svc.Deploy(context.Background(), model.Name, nil); err == nil {
 				t.Fatal("expected the deploy to fail")
 			}
 			blamed := len(badHosts.added) > 0
@@ -261,7 +261,7 @@ func TestDeployNeverBlamesHostForACrash(t *testing.T) {
 		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
 	)
 
-	_, err := svc.Deploy(context.Background(), model.Name)
+	_, err := svc.Deploy(context.Background(), model.Name, nil)
 	if err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
@@ -296,7 +296,7 @@ func TestDeployBlamesHostThatAteTheBudgetProvisioning(t *testing.T) {
 		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
 	)
 
-	if _, err := svc.Deploy(context.Background(), model.Name); err == nil {
+	if _, err := svc.Deploy(context.Background(), model.Name, nil); err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
 	reason, blamed := badHosts.added[oneOffer()[0].MachineID]
@@ -321,7 +321,7 @@ func TestDeployDoesNotBlameAPromptHostForATimeout(t *testing.T) {
 		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
 	)
 
-	if _, err := svc.Deploy(context.Background(), model.Name); err == nil {
+	if _, err := svc.Deploy(context.Background(), model.Name, nil); err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
 	if len(badHosts.added) != 0 {

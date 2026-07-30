@@ -15,7 +15,8 @@ import (
 // VastaiProvider abstracts vast.ai API operations for the domain layer.
 type VastaiProvider interface {
 	// Offer / instance lifecycle (used by DeployService)
-	SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]OfferResult, error)
+	// countries restricts the search to ISO-3166 alpha-2 codes; empty = anywhere.
+	SearchOffers(minGPURAM int, numGPUs int, minDiskGB int, countries []string) ([]OfferResult, error)
 	CreateInstance(offerID int, image string, envVars map[string]string, onstart string, diskGB int) (instanceID int, err error)
 	WaitForInstance(ctx context.Context, instanceID int) (sshHost string, sshPort int, hourlyRate float64, err error)
 	StopInstance(instanceID int) error
@@ -156,6 +157,15 @@ func NewDeployService(
 	}
 }
 
+// countryNote renders the geographic restriction for progress and error output,
+// so "no offers found" is never mysterious when a filter caused it.
+func countryNote(countries []string) string {
+	if len(countries) == 0 {
+		return ""
+	}
+	return ", in " + strings.Join(countries, "/")
+}
+
 // diskFor returns the container disk size (GB) to request for a model.
 func diskFor(model *entity.Model) int {
 	if model.DiskGB > 0 {
@@ -281,7 +291,7 @@ func scaledContextLength(model *entity.Model, offerGPUMemoryMB float64) int {
 // Deploy executes the full init flow: find offer → create instance → SSH → tunnel → health.
 // Instances are disposable: if any step after creation fails, the vast.ai instance
 // is destroyed and the tunnel killed so a failed deploy never leaves a paid GPU running.
-func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.Instance, error) {
+func (s *DeployService) Deploy(ctx context.Context, modelName string, countries []string) (*entity.Instance, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -303,14 +313,16 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 	}
 	diskGB := diskFor(model)
 	minHostDisk := diskGB + diskHeadroomGB
-	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM (host disk >= %dGB)...\n", numGPUs, model.VRAM, minHostDisk)
-	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk)
+	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM (host disk >= %dGB%s)...\n",
+		numGPUs, model.VRAM, minHostDisk, countryNote(countries))
+	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk, countries)
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
 	offers = s.filterBadHosts(offers)
 	if len(offers) == 0 {
-		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM (after filtering bad hosts)", numGPUs, model.VRAM)
+		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM%s (after filtering bad hosts)",
+			numGPUs, model.VRAM, countryNote(countries))
 	}
 	offer := offers[0] // cheapest (already sorted)
 	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)
@@ -587,7 +599,7 @@ type CreateOnlyResult struct {
 // DeployCreateOnly creates the instance and waits for it to be running, but does not
 // set up the SSH tunnel or wait for server health. The instance is intentionally left
 // running so the user can attach manually — no failure cleanup here.
-func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string) (*CreateOnlyResult, error) {
+func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, countries []string) (*CreateOnlyResult, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -607,14 +619,16 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string) 
 	}
 	diskGB := diskFor(model)
 	minHostDisk := diskGB + diskHeadroomGB
-	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM (host disk >= %dGB)...\n", numGPUs, model.VRAM, minHostDisk)
-	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk)
+	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM (host disk >= %dGB%s)...\n",
+		numGPUs, model.VRAM, minHostDisk, countryNote(countries))
+	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk, countries)
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
 	offers = s.filterBadHosts(offers)
 	if len(offers) == 0 {
-		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM (after filtering bad hosts)", numGPUs, model.VRAM)
+		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM%s (after filtering bad hosts)",
+			numGPUs, model.VRAM, countryNote(countries))
 	}
 	offer := offers[0]
 	fmt.Printf("Selected: %dx %s (%.0fGB each) at $%.3f/hr\n", offer.NumGPUs, offer.GPUName, offer.GPUMemory, offer.DPHTotal)

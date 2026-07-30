@@ -246,7 +246,7 @@ func (s *InstanceService) SearchOffers(ctx context.Context, model *entity.Model)
 	if numGPUs <= 0 {
 		numGPUs = 1
 	}
-	return s.vastai.SearchOffers(model.VRAM, numGPUs, diskFor(model)+diskHeadroomGB)
+	return s.vastai.SearchOffers(model.VRAM, numGPUs, diskFor(model)+diskHeadroomGB, nil)
 }
 
 // ============================================================================

@@ -198,6 +198,8 @@ type fakeVastai struct {
 	waitErr   error
 	waitDelay time.Duration // simulated provisioning time
 
+	searchedCountries []string
+
 	destroyed  []int
 	destroyErr error
 	stopped    []int
@@ -207,7 +209,8 @@ type fakeVastai struct {
 
 var _ VastaiProvider = (*fakeVastai)(nil)
 
-func (v *fakeVastai) SearchOffers(minGPURAM, numGPUs, minDiskGB int) ([]OfferResult, error) {
+func (v *fakeVastai) SearchOffers(minGPURAM, numGPUs, minDiskGB int, countries []string) ([]OfferResult, error) {
+	v.searchedCountries = countries
 	return v.offers, nil
 }
 func (v *fakeVastai) CreateInstance(offerID int, image string, env map[string]string, onstart string, diskGB int) (int, error) {

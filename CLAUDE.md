@@ -13,7 +13,7 @@ Key reference: https://docs.vast.ai/api-reference/introduction
 | Command | Purpose |
 |---|---|
 | `mycodeagent models` | List available models with live cheapest-offer pricing |
-| `mycodeagent init <model>` | Deploy model: rent GPU, start `llama-server` (downloads the GGUF from HuggingFace), establish SSH tunnel. Destroys the instance automatically if startup fails. |
+| `mycodeagent init <model>` | Deploy model: rent GPU, start `llama-server` (downloads the GGUF from HuggingFace), establish SSH tunnel. Destroys the instance automatically if startup fails. `--country FR,DE` restricts the offer search. |
 | `mycodeagent ps` | Sync with vast.ai and list deployed instances |
 | `mycodeagent stop <id>` | Release the GPU, keep the instance + container disk (disk keeps billing) |
 | `mycodeagent start <id>` | Resume a stopped instance and reopen its tunnel; skips the GGUF download |

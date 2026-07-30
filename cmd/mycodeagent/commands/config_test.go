@@ -1,6 +1,9 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The global `model` key is the user's setting. `mycodeagent config` may claim it
 // only when it is unset or already points at a provider this command owns.
@@ -124,5 +127,60 @@ func TestBuildModelConfigScopesTemperature(t *testing.T) {
 	// A server that didn't report a window must not get a bogus limit.
 	if _, has := buildModelConfig("x", 0)["limit"]; has {
 		t.Error("limit written despite an unknown context length")
+	}
+}
+
+// An unknown or malformed country code must be rejected here. vast.ai answers an
+// unrecognised code with an empty result set, which is indistinguishable from
+// "your other filters are too tight" — so the error would send you hunting for
+// the wrong problem.
+func TestParseCountries(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    []string
+		wantErr bool
+	}{
+		{"", nil, false},
+		{"   ", nil, false},
+		{"US", []string{"US"}, false},
+		{"fr,de", []string{"FR", "DE"}, false},
+		{" ro , pl ", []string{"RO", "PL"}, false},
+		{"US,US,ca", []string{"US", "CA"}, false}, // deduplicated
+		{"USA", nil, true},                        // three letters
+		{"U", nil, true},                          // one letter
+		{"U1", nil, true},                         // not letters
+		{"US,XXX", nil, true},                     // one bad entry fails the lot
+	} {
+		got, err := parseCountries(tc.in)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseCountries(%q) err=%v, wantErr=%v", tc.in, err, tc.wantErr)
+			continue
+		}
+		if tc.wantErr {
+			continue
+		}
+		if len(got) != len(tc.want) {
+			t.Errorf("parseCountries(%q) = %v, want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("parseCountries(%q) = %v, want %v", tc.in, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+// The help text is the only place a user learns which codes are worth trying, so
+// it must actually list them — an empty or generic blurb makes the flag useless.
+func TestCountryHelpListsRealCodes(t *testing.T) {
+	for _, code := range []string{"US", "DE", "FR", "RO", "JP", "KR", "NO"} {
+		if !strings.Contains(countryHelp, code) {
+			t.Errorf("countryHelp does not mention %s", code)
+		}
+	}
+	if !strings.Contains(countryHelp, "--country") {
+		t.Error("countryHelp shows no usage example")
 	}
 }

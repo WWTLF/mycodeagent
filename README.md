@@ -36,6 +36,7 @@ yet — without it the tunnel can't be established.
 |---|---|
 | `mycodeagent models` | List the catalog with live cheapest-offer pricing |
 | `mycodeagent init <model>` | Rent a GPU, start `llama-server`, open the SSH tunnel. Self-destroys on failure. |
+| `mycodeagent init <model> --country FR,DE` | Same, restricted to those countries (ISO-3166 alpha-2) |
 | `mycodeagent init <model> --create-instance-only` | Create the instance and print SSH details; no tunnel, no health wait |
 | `mycodeagent ps` | Sync with vast.ai and list instances (status, health, tunnel URL) |
 | `mycodeagent stop <id>` | Release the GPU but keep the instance + disk (see the cost note below) |

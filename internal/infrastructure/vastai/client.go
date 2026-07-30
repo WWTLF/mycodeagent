@@ -142,8 +142,9 @@ func (c *Client) VerifyAPIKey() error {
 
 // SearchOffers finds GPU offers matching the VRAM and GPU count requirements.
 // minDiskGB is the minimum *host* free disk to require (container disk + image
-// + scratch); pass <= 0 to fall back to a safe default.
-func (c *Client) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]Offer, error) {
+// + scratch); pass <= 0 to fall back to a safe default. countries restricts the
+// search to those ISO-3166 alpha-2 codes; empty means anywhere.
+func (c *Client) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int, countries []string) ([]Offer, error) {
 	// gpu_ram is in MB on vast.ai API. compute_cap >= 800 keeps us on Ampere or
 	// newer: llama.cpp's CUDA build runs on much older cards, but the ggml kernels
 	// we care about (flash attention with a quantized KV cache, `-fa on` +
@@ -174,7 +175,19 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]Offe
 	// verified==true filters out unverified hosts whose vast.ai worker is often broken
 	// (those emit `docker_build() error writing dockerfile` at container creation).
 	// reliability2 >= 0.95 further weeds out hosts with flaky recent uptime history.
-	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"cuda_vers\":{\"gte\":12.8},\"cuda_max_good\":{\"gte\":12.8},\"disk_space\":{\"gte\":%d},\"inet_down\":{\"gte\":%d},\"verified\":{\"eq\":true},\"reliability2\":{\"gte\":0.95},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs, minDiskGB, minInetDownMbps)
+	// geolocation is matched on the bare country code even though the field reads
+	// "Romania, RO" — verified against the live API, where both {"eq":"RO"} and
+	// {"in":["RO","DE"]} filter correctly.
+	geo := ""
+	if len(countries) > 0 {
+		quoted := make([]string, len(countries))
+		for i, c := range countries {
+			quoted[i] = fmt.Sprintf("%q", c)
+		}
+		geo = fmt.Sprintf(",\"geolocation\":{\"in\":[%s]}", strings.Join(quoted, ","))
+	}
+
+	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"cuda_vers\":{\"gte\":12.8},\"cuda_max_good\":{\"gte\":12.8},\"disk_space\":{\"gte\":%d},\"inet_down\":{\"gte\":%d}%s,\"verified\":{\"eq\":true},\"reliability2\":{\"gte\":0.95},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs, minDiskGB, minInetDownMbps, geo)
 
 	var offers struct {
 		Offers []Offer `json:"offers"`
