@@ -12,6 +12,26 @@ import (
 
 const baseURL = "https://console.vast.ai"
 
+// minInetDownMbps is the minimum host download bandwidth an offer must report.
+//
+// This exists because the deploy sorts purely by price, and the cheapest offers
+// cluster in regions with poor reachability to HuggingFace. Three consecutive
+// `rude` deploys landed on Sichuan machines advertising 82-284 Mbit/s and pulled
+// the GGUF at ~1 MiB/s — a 21 GB model would have taken five hours, so each one
+// died on the startup deadline. Parallel connections did not help: eight streams
+// summed to the same throughput as one, so it is a hard cap, not per-connection
+// throttling.
+//
+// 400 Mbit/s is comfortably above the 25 MB/s (200 Mbit/s) the timeout budget in
+// model_repo_static.go assumes, and it leaves a wide pool: at the 32 GB tier it
+// drops the three cheapest and keeps offers from ~$0.30/hr. Paying ~50% more per
+// hour for a deploy that finishes is the right trade when the alternative is
+// paying for a GPU that idles while it downloads.
+//
+// Note this is the host's advertised link speed, not its route to HuggingFace —
+// a good proxy, not a guarantee.
+const minInetDownMbps = 400
+
 type Client struct {
 	apiKey     string
 	httpClient *http.Client
@@ -154,7 +174,7 @@ func (c *Client) SearchOffers(minGPURAM int, numGPUs int, minDiskGB int) ([]Offe
 	// verified==true filters out unverified hosts whose vast.ai worker is often broken
 	// (those emit `docker_build() error writing dockerfile` at container creation).
 	// reliability2 >= 0.95 further weeds out hosts with flaky recent uptime history.
-	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"cuda_vers\":{\"gte\":12.8},\"cuda_max_good\":{\"gte\":12.8},\"disk_space\":{\"gte\":%d},\"verified\":{\"eq\":true},\"reliability2\":{\"gte\":0.95},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs, minDiskGB)
+	url := fmt.Sprintf("%s/api/v0/bundles/?q={\"gpu_ram\":{\"gte\":%d},\"num_gpus\":{\"eq\":%d},\"compute_cap\":{\"gte\":800},\"cuda_vers\":{\"gte\":12.8},\"cuda_max_good\":{\"gte\":12.8},\"disk_space\":{\"gte\":%d},\"inet_down\":{\"gte\":%d},\"verified\":{\"eq\":true},\"reliability2\":{\"gte\":0.95},\"rentable\":{\"eq\":true},\"order\":[[\"dph_total\",\"asc\"]],\"type\":\"on-demand\"}", baseURL, minRAMMB, numGPUs, minDiskGB, minInetDownMbps)
 
 	var offers struct {
 		Offers []Offer `json:"offers"`

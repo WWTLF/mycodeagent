@@ -96,6 +96,7 @@ const defaultStartupTimeout = 20 * time.Minute
 // this took 9.3 minutes, then ran llama-server so slowly it never started the
 // download. The budget in model_repo_static.go tolerates up to 10 minutes here,
 // so anything past half of that is already an outlier.
+//
 // A variable, like the watcher cadence below, so a test can drive the positive
 // path without sleeping for minutes.
 var slowProvisionThreshold = 5 * time.Minute
@@ -186,6 +187,22 @@ var (
 	livenessGracePeriod = 90 * time.Second
 	livenessInterval    = 20 * time.Second
 )
+
+// markHostBadUnlessCancelled records a host-side failure, except when the cause
+// was the user interrupting the deploy.
+//
+// Ctrl-C surfaces as context.Canceled from whichever wait was in flight, and the
+// wait phases cannot tell it apart from a real failure without this check. The
+// consequence was silent and cumulative: every aborted deploy blacklisted a
+// perfectly good machine, so a session spent aborting slow deploys would drain
+// the offer pool one host at a time — the exact failure the crash-path rule was
+// written to avoid, arriving through a different door.
+func (s *DeployService) markHostBadUnlessCancelled(machineID int, phase string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	s.markHostBad(machineID, fmt.Sprintf("%s: %v", phase, err))
+}
 
 // blameHostIfSlowToProvision records the host only when a startup timeout is
 // attributable to it. Called from the timeout paths, never from the crash path.
@@ -344,8 +361,9 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 	provisionStart := time.Now()
 	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
 	if err != nil {
-		// Instance never reached running → host-side problem, blacklist it.
-		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for instance: %v", err))
+		// Instance never reached running → host-side problem, blacklist it —
+		// unless the user interrupted, which says nothing about the machine.
+		s.markHostBadUnlessCancelled(offer.MachineID, "wait for instance", err)
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
 	// How long the host took to pull and unpack the image. Retained because a
@@ -356,8 +374,8 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 
 	fmt.Println("Waiting for SSH...")
 	if err := s.ssh.WaitForSSH(ctx, sshHost, sshPort); err != nil {
-		// SSH never came up → host-side problem, blacklist it.
-		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for SSH: %v", err))
+		// SSH never came up → host-side problem, blacklist it (same caveat).
+		s.markHostBadUnlessCancelled(offer.MachineID, "wait for SSH", err)
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
 
@@ -536,7 +554,7 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string) 
 	fmt.Println("Waiting for instance to start...")
 	sshHost, sshPort, hourlyRate, err := s.vastai.WaitForInstance(ctx, instanceID)
 	if err != nil {
-		s.markHostBad(offer.MachineID, fmt.Sprintf("wait for instance: %v", err))
+		s.markHostBadUnlessCancelled(offer.MachineID, "wait for instance", err)
 		return nil, fmt.Errorf("wait for instance: %w", err)
 	}
 

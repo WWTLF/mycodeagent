@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,45 @@ func TestRestartReusesPersistedContextLength(t *testing.T) {
 	if eng.lastContext != 131072 {
 		t.Errorf("restart used context %d, want the persisted 131072 (catalog baseline is %d)",
 			eng.lastContext, model.ContextLength)
+	}
+}
+
+// Ctrl-C surfaces as context.Canceled from whichever wait was in flight. It says
+// nothing about the machine, so it must not blacklist one — otherwise a session
+// spent aborting slow deploys silently drains the offer pool one good host at a
+// time. Observed live: machine 141581 was banned for an interrupted deploy.
+func TestDeployDoesNotBlacklistOnUserCancel(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		waitErr   error
+		wantBlame bool
+	}{
+		{"user interrupted", context.Canceled, false},
+		{"wrapped interrupt", fmt.Errorf("instance 1 did not start: %w", context.Canceled), false},
+		{"genuine timeout", context.DeadlineExceeded, true},
+		{"wrapped timeout", fmt.Errorf("instance 1 did not start: %w", context.DeadlineExceeded), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			badHosts := newFakeBadHostRepo()
+			vast := &fakeVastai{offers: oneOffer(), createdID: 1, waitErr: tc.waitErr}
+			model := testDeployModel()
+			svc := NewDeployService(
+				&fakeModelRepo{models: []*entity.Model{model}},
+				newFakeInstanceRepo(), badHosts, vast, &fakeSSH{}, &fakeEngine{}, 8000, "",
+			)
+
+			if _, err := svc.Deploy(context.Background(), model.Name); err == nil {
+				t.Fatal("expected the deploy to fail")
+			}
+			blamed := len(badHosts.added) > 0
+			if blamed != tc.wantBlame {
+				t.Errorf("blacklisted=%v, want %v (recorded: %v)", blamed, tc.wantBlame, badHosts.added)
+			}
+			// Either way the instance must be gone — cancelling still tears down.
+			if len(vast.destroyed) != 1 {
+				t.Errorf("instance not destroyed: %v", vast.destroyed)
+			}
+		})
 	}
 }
 
