@@ -22,6 +22,12 @@ const (
 	// `llama-server` resolves.
 	binaryPath = "/app/llama-server"
 
+	// cacheDir is where `-hf` puts the GGUF. It is the HuggingFace client's
+	// layout, not llama.cpp's own ~/.cache/llama.cpp — confirmed on a live
+	// instance, where the file landed under
+	// /root/.cache/huggingface/hub/models--<org>--<repo>/blobs/.
+	cacheDir = "/root/.cache/huggingface"
+
 	// procPattern matches llama-server in /proc/<pid>/cmdline. The last character
 	// is bracketed so the pattern never matches the process running the check:
 	// the command text itself sits in that shell's argv, which /proc/*/cmdline
@@ -79,6 +85,19 @@ func (e *LlamaCppEngine) RestartCommands(model *entity.Model) (killCmd string, s
 // whether llama-server is still running.
 func (e *LlamaCppEngine) LivenessCommand() string {
 	return fmt.Sprintf("grep -qs '%s' /proc/*/cmdline && echo ALIVE || echo DEAD", procPattern)
+}
+
+// DownloadedBytesCommand prints how many bytes of the model have landed in the
+// cache so far, or 0 before it exists.
+//
+// `-hf` downloads through the HuggingFace client, so the cache is the HF layout
+// (models--<org>--<repo>/blobs/…) and NOT ~/.cache/llama.cpp — verified on a live
+// deploy. The in-progress blob is a sibling `.downloadInProgress` file, and `du`
+// counts it, which is exactly what makes this usable as a progress signal:
+// llama.cpp prints nothing at all while downloading, so the log looks identical
+// to a hang for however many minutes the GGUF takes.
+func (e *LlamaCppEngine) DownloadedBytesCommand() string {
+	return fmt.Sprintf("du -sb %s 2>/dev/null | cut -f1 || echo 0", cacheDir)
 }
 
 // LogPath returns the remote path the onstart script tees server output to.

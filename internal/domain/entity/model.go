@@ -17,6 +17,7 @@ type Model struct {
 	VRAM             int           // GB required per GPU (baseline)
 	NumGPUs          int           // GPU count to rent; SearchOffers matches it with `eq`, so the offer always has exactly this many
 	DiskGB           int           // container disk to request on vast.ai; sized to hold the image + GGUF download + scratch (0 = default)
+	DownloadGB       float64       // size of the GGUF being fetched; used only to turn download progress into a percentage (0 = report bytes without a total)
 	StartupTimeout   time.Duration // max time to wait for instance + model server to become healthy
 	ContextLength    int           // baseline context length sized for VRAM (0 = engine default)
 	MaxContextLength int           // architectural ceiling; DeployService scales ContextLength up toward this when the offer has more VRAM per GPU than VRAM. 0 = no scaling.

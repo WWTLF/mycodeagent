@@ -114,6 +114,26 @@ func TestServeArgsSplitMode(t *testing.T) {
 	}
 }
 
+// `-hf` downloads through the HuggingFace client, so the cache is the HF layout —
+// NOT ~/.cache/llama.cpp, which the docs claimed until a live deploy showed the
+// file under /root/.cache/huggingface/hub/models--<org>--<repo>/blobs/. Pointing
+// the probe at the wrong directory would report 0 bytes forever, i.e. exactly the
+// "looks hung" symptom it exists to remove.
+func TestDownloadedBytesCommandReadsTheHuggingFaceCache(t *testing.T) {
+	cmd := NewLlamaCppEngine().DownloadedBytesCommand()
+
+	if !strings.Contains(cmd, "/root/.cache/huggingface") {
+		t.Errorf("probe does not read the HF cache: %s", cmd)
+	}
+	if strings.Contains(cmd, "llama.cpp") {
+		t.Errorf("probe reads the wrong cache directory: %s", cmd)
+	}
+	// Must print a bare number even when the directory does not exist yet.
+	if !strings.Contains(cmd, "echo 0") {
+		t.Errorf("probe has no zero fallback before the download starts: %s", cmd)
+	}
+}
+
 // Restart strips the trailing " && bash ..." to re-write the script without
 // running it, so BuildOnstart must keep that exact separator in place.
 func TestBuildOnstartShapeSupportsRestartRewrite(t *testing.T) {
@@ -193,6 +213,11 @@ func TestProcessCommandsAvoidProcpsAndSelfMatch(t *testing.T) {
 		if strings.Contains(cmd, "llama-server") {
 			t.Errorf("%s contains an unbracketed 'llama-server' and will self-match: %s", name, cmd)
 		}
+	}
+
+	// The progress probe runs on the same bare image and must obey the same rules.
+	if dl := e.DownloadedBytesCommand(); strings.Contains(dl, "pgrep") || strings.Contains(dl, "pkill") {
+		t.Errorf("DownloadedBytesCommand uses procps tooling: %s", dl)
 	}
 
 	if !strings.Contains(killCmd, "kill -9 ") {

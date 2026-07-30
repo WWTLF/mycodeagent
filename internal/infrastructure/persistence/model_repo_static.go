@@ -73,6 +73,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             16,
 		NumGPUs:          1,
 		DiskGB:           20,
+		DownloadGB:       6.7,
 		StartupTimeout:   16 * time.Minute,
 		ContextLength:    65536, // 6.7 + 4.5 KV + 1.5 = 12.7 of ~15.4
 		MaxContextLength: 262144,
@@ -101,6 +102,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             24,
 		NumGPUs:          1,
 		DiskGB:           28,
+		DownloadGB:       15.4,
 		StartupTimeout:   22 * time.Minute,
 		ContextLength:    32768, // 15.4 + 4.5 KV + 1.5 = 21.4 of ~23.4
 		MaxContextLength: 262144,
@@ -130,6 +132,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             24,
 		NumGPUs:          1,
 		DiskGB:           32,
+		DownloadGB:       17.7,
 		StartupTimeout:   24 * time.Minute,
 		ContextLength:    65536, // 17.7 + 2.8 KV + 1.5 = 22.0 of ~23.4
 		MaxContextLength: 262144,
@@ -158,6 +161,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             32,
 		NumGPUs:          1,
 		DiskGB:           32,
+		DownloadGB:       19.5,
 		StartupTimeout:   26 * time.Minute,
 		ContextLength:    65536, // 19.5 + 8.9 KV + 1.5 = 29.9 of ~31.4
 		MaxContextLength: 262144,
@@ -188,6 +192,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             48,
 		NumGPUs:          1,
 		DiskGB:           38,
+		DownloadGB:       25.6,
 		StartupTimeout:   30 * time.Minute,
 		ContextLength:    131072, // 25.6 + 17.8 KV + 1.5 = 44.9 of ~47.4
 		MaxContextLength: 262144,
@@ -217,6 +222,7 @@ var defaultModels = []*entity.Model{
 		VRAM:             32,
 		NumGPUs:          1,
 		DiskGB:           34,
+		DownloadGB:       21.2,
 		StartupTimeout:   26 * time.Minute,
 		ContextLength:    131072, // 21.2 + 5.5 KV + 1.5 = 28.2 of ~31.4
 		MaxContextLength: 262144,

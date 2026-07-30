@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +55,10 @@ type EngineProvider interface {
 	// depending on whether the model server process is still running. Keeping it
 	// here means the domain never hardcodes a process name or a probing tool.
 	LivenessCommand() string
+	// DownloadedBytesCommand returns a remote shell command that prints the
+	// number of bytes fetched into the model cache so far, or 0. The cache
+	// location is engine-specific, which is why this lives behind the interface.
+	DownloadedBytesCommand() string
 	// LogPath returns the remote path the server's stdout/stderr is teed to.
 	LogPath() string
 }
@@ -415,7 +420,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 	}()
 	// Liveness watcher: if the server process dies during startup, abort early
 	// with the tail of its log instead of polling a dead port until timeout.
-	go s.watchServerProcess(ctx, sshHost, sshPort, failCh)
+	go s.watchServerProcess(ctx, model, sshHost, sshPort, failCh)
 
 	select {
 	case healthErr := <-healthCh:
@@ -450,7 +455,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string) (*entity.I
 // a crash instead of waiting out the full startup timeout. It requires two
 // consecutive "dead" reads to avoid a false positive during a brief re-exec.
 // The probe command and log path come from the engine, not from this layer.
-func (s *DeployService) watchServerProcess(ctx context.Context, sshHost string, sshPort int, failCh chan<- error) {
+func (s *DeployService) watchServerProcess(ctx context.Context, model *entity.Model, sshHost string, sshPort int, failCh chan<- error) {
 	// Grace period: let the onstart script write itself and launch the server.
 	select {
 	case <-ctx.Done():
@@ -463,9 +468,17 @@ func (s *DeployService) watchServerProcess(ctx context.Context, sshHost string, 
 
 	liveness := s.engine.LivenessCommand()
 	tailCmd := fmt.Sprintf("tail -n 25 %s 2>/dev/null", s.engine.LogPath())
+	progress := newDownloadReporter(model)
 
 	deadCount := 0
 	for {
+		// Same tick, second call: the model server prints nothing at all while
+		// fetching the GGUF, so without this the whole download — minutes, on a
+		// 25 GB model — is indistinguishable from a hang.
+		if bytesOut, err := s.ssh.RunRemoteCommand(sshHost, sshPort, s.engine.DownloadedBytesCommand()); err == nil {
+			progress.report(bytesOut)
+		}
+
 		out, err := s.ssh.RunRemoteCommand(sshHost, sshPort, liveness)
 		switch {
 		case err != nil:
@@ -488,6 +501,71 @@ func (s *DeployService) watchServerProcess(ctx context.Context, sshHost string, 
 		case <-ticker.C:
 		}
 	}
+}
+
+// downloadReporter turns successive byte counts from the instance into a line
+// the user can read, and stays quiet once the download is done.
+//
+// It exists because llama.cpp emits nothing while fetching a GGUF: the log sits
+// unchanged and the tunnel logs "connect_to localhost port 8000: failed" on
+// repeat, which looks exactly like a hang. Several deploys were aborted on that
+// suspicion before anyone confirmed the bytes were still arriving.
+type downloadReporter struct {
+	totalBytes float64 // 0 when the model declares no size — then report bytes only
+	last       int64
+	lastAt     time.Time
+	done       bool
+}
+
+func newDownloadReporter(model *entity.Model) *downloadReporter {
+	return &downloadReporter{totalBytes: model.DownloadGB * bytesPerGB}
+}
+
+// Decimal units throughout, because that is what the sizes are measured in:
+// HuggingFace reports file sizes in decimal GB and the catalog figures were
+// copied from there. Verified against a finished download — `du -sb` returned
+// 25 636 485 460 bytes for the entry the catalog calls 25.6 GB, which is exactly
+// 25.6e9 and not 25.6 GiB. Dividing by 1024³ made a complete download read 93%.
+const (
+	bytesPerGB = 1e9
+	bytesPerMB = 1e6
+)
+
+// report parses one sample and prints progress when it has moved.
+func (r *downloadReporter) report(out []byte) {
+	if r.done {
+		return
+	}
+	got, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil || got <= 0 {
+		return
+	}
+	now := time.Now()
+	if r.last == 0 {
+		r.last, r.lastAt = got, now
+		return // first sample: no rate to report yet
+	}
+	if got == r.last {
+		return // nothing new since the last tick; stay quiet
+	}
+
+	var rate string
+	if elapsed := now.Sub(r.lastAt).Seconds(); elapsed > 0 {
+		rate = fmt.Sprintf(" at %.0f MB/s", float64(got-r.last)/elapsed/bytesPerMB)
+	}
+	if r.totalBytes > 0 {
+		pct := float64(got) / r.totalBytes * 100
+		if pct > 100 {
+			// The cache also holds the odd config/tokenizer file, so the ratio can
+			// tip just past the GGUF's own size. Don't print 103%.
+			pct = 100
+		}
+		fmt.Printf("  downloading model: %.1f / %.1f GB (%.0f%%)%s\n",
+			float64(got)/bytesPerGB, r.totalBytes/bytesPerGB, pct, rate)
+	} else {
+		fmt.Printf("  downloading model: %.1f GB%s\n", float64(got)/bytesPerGB, rate)
+	}
+	r.last, r.lastAt = got, now
 }
 
 // engineEnv builds the per-instance environment (HF token for gated repos /
@@ -593,9 +671,14 @@ func (s *DeployService) Start(ctx context.Context, id int64) error {
 	}
 
 	// The startup budget comes from the model when it's still in the catalog; a
-	// row referencing a removed model still has to be startable.
+	// row referencing a removed model still has to be startable. The lookup is
+	// hoisted because the watcher wants the model too (for the download size);
+	// a nil model there simply means progress is reported without a percentage.
 	timeout := defaultStartupTimeout
-	if model, err := s.models.FindByName(inst.ModelName); err == nil && model.StartupTimeout > 0 {
+	model, modelErr := s.models.FindByName(inst.ModelName)
+	if modelErr != nil {
+		model = &entity.Model{Name: inst.ModelName}
+	} else if model.StartupTimeout > 0 {
 		timeout = model.StartupTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -651,7 +734,7 @@ func (s *DeployService) Start(ctx context.Context, id int64) error {
 	healthCh := make(chan error, 1)
 	failCh := make(chan error, 1)
 	go func() { healthCh <- s.ssh.WaitForServerHealth(ctx, localPort) }()
-	go s.watchServerProcess(ctx, sshHost, sshPort, failCh)
+	go s.watchServerProcess(ctx, model, sshHost, sshPort, failCh)
 
 	select {
 	case healthErr := <-healthCh:

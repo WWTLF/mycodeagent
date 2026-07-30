@@ -331,6 +331,7 @@ func (e *fakeEngine) BuildOnstart(m *entity.Model, numGPUs, ctxLen int, hfToken 
 func (e *fakeEngine) BuildRawCommand(m *entity.Model, numGPUs, ctxLen int) string { return "run" }
 func (e *fakeEngine) RestartCommands(m *entity.Model) (string, string)            { return "kill", "start" }
 func (e *fakeEngine) LivenessCommand() string                                     { return "liveness" }
+func (e *fakeEngine) DownloadedBytesCommand() string                              { return "downloaded" }
 func (e *fakeEngine) LogPath() string                                             { return "/tmp/llama.log" }
 
 // --------------------------------------------------------------------- probe
