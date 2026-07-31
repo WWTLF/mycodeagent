@@ -21,8 +21,9 @@ const SyncRootName = "COMFY_SYNC"
 // is work lost when an instance dies unexpectedly.
 const syncIntervalSeconds = 60
 
-// StartSync launches a detached loop that rsyncs the engine's output directories
-// into ./COMFY_SYNC, and returns its pid.
+// StartSync launches a detached loop that keeps the engine's directories in step
+// with ./COMFY_SYNC, and returns its pid. Most are pulled down only; the ones
+// the engine marks Push travel both ways.
 //
 // It exists because instances are disposable and `kill` is the documented way to
 // finish. That was free while llama.cpp was the only engine — it reads weights
@@ -85,9 +86,17 @@ func StopSync(pid int) error {
 // directory may not exist until the engine first writes to it, and resolving
 // once would then sync nothing forever.
 //
-// No --delete. Mirroring would mean a remote wipe — or a resolver that picks a
-// different, empty candidate — silently erasing files already pulled to safety.
-// Accumulating is the behaviour that cannot lose data.
+// No --delete, in either direction. Mirroring would mean a remote wipe — or a
+// resolver that picks a different, empty candidate — silently erasing files
+// already pulled to safety. Accumulating is the behaviour that cannot lose data.
+// The cost is that deleting a file only on one side brings it back on the next
+// pass; deleting it on both is what sticks.
+//
+// Two-way directories additionally pass --update in both directions, so each
+// side refuses to overwrite a file the other has a newer copy of. Two people
+// editing the same workflow at the same second is not a case this resolves — it
+// resolves the case that actually happens, which is edits on one side at a time,
+// and it fails by leaving a file alone rather than by destroying it.
 func buildSyncScript(sshHost string, sshPort int, dirs []entity.SyncDir, root string) string {
 	sshCmd := "ssh " + strings.Join(baseArgs(sshPort), " ")
 
@@ -95,16 +104,72 @@ func buildSyncScript(sshHost string, sshPort int, dirs []entity.SyncDir, root st
 	b.WriteString("while :; do\n")
 	for _, d := range dirs {
 		local := filepath.Join(root, d.Local)
-		var probe strings.Builder
-		for _, c := range d.RemoteCandidates {
-			fmt.Fprintf(&probe, "[ -d %s ] && echo %s && break; ", shellQuote(c), shellQuote(c))
-		}
+
 		fmt.Fprintf(&b, "  REMOTE=$(%s root@%s %s 2>/dev/null | tr -d '\\r' | tail -1)\n",
-			sshCmd, sshHost, shellQuote("for _ in 1; do "+probe.String()+"done"))
-		fmt.Fprintf(&b, "  if [ -n \"$REMOTE\" ]; then mkdir -p %s && rsync -az --partial -e %s root@%s:\"$REMOTE\"/ %s/ >/dev/null 2>&1; fi\n",
-			shellQuote(local), shellQuote(sshCmd), sshHost, shellQuote(local))
+			sshCmd, sshHost, shellQuote(remoteResolver(d)))
+
+		// --update protects a local edit from being clobbered by an older remote
+		// copy. It is confined to two-way directories: for a pull-only one the
+		// remote is the sole author, and skipping a file because the local mtime
+		// happens to be ahead would mean never pulling it.
+		flags := "-az --partial"
+		if d.Push {
+			flags += " --update"
+		}
+
+		fmt.Fprintf(&b, "  if [ -n \"$REMOTE\" ]; then\n")
+		fmt.Fprintf(&b, "    mkdir -p %s\n", shellQuote(local))
+		if d.Push {
+			// Up before down, so a fresh instance is seeded with what is already
+			// on disk here before anything is pulled back.
+			fmt.Fprintf(&b, "    rsync %s -e %s %s/ root@%s:\"$REMOTE\"/ >/dev/null 2>&1\n",
+				flags, shellQuote(sshCmd), shellQuote(local), sshHost)
+		}
+		fmt.Fprintf(&b, "    rsync %s -e %s root@%s:\"$REMOTE\"/ %s/ >/dev/null 2>&1\n",
+			flags, shellQuote(sshCmd), sshHost, shellQuote(local))
+		fmt.Fprintf(&b, "  fi\n")
 	}
 	fmt.Fprintf(&b, "  sleep %d\ndone\n", syncIntervalSeconds)
+	return b.String()
+}
+
+// remoteResolver renders the shell run on the instance to pick the directory to
+// sync against. It prints the path, or nothing.
+//
+// First choice is always a candidate that already exists. A push-only second
+// pass then creates the directory, because a push has nowhere to write until it
+// does and a workflows directory does not appear until the first workflow is
+// saved on the instance — which for someone editing them locally may be never,
+// leaving a two-way directory permanently one-way.
+//
+// Creating a path is only safe when it is known to be the right one, so the
+// second pass requires the candidate to sit under a tree containing the marker
+// file. Without that check a stale candidate list would create a plausible
+// directory in an image that keeps its files elsewhere, and the sync would then
+// run for the life of the instance writing where nothing reads.
+func remoteResolver(d entity.SyncDir) string {
+	var b strings.Builder
+	b.WriteString("R=''; ")
+	for _, c := range d.RemoteCandidates {
+		fmt.Fprintf(&b, "[ -z \"$R\" ] && [ -d %s ] && R=%s; ", shellQuote(c), shellQuote(c))
+	}
+
+	if d.Push && d.RootMarker != "" {
+		b.WriteString("if [ -z \"$R\" ]; then for c in ")
+		for i, c := range d.RemoteCandidates {
+			if i > 0 {
+				b.WriteString(" ")
+			}
+			b.WriteString(shellQuote(c))
+		}
+		// Walk up from the candidate looking for the marker; the loop stops at /
+		// so an absent marker terminates rather than spinning.
+		fmt.Fprintf(&b, "; do d=\"$c\"; while [ -n \"$d\" ] && [ \"$d\" != / ]; do "+
+			"if [ -e \"$d/%s\" ]; then mkdir -p \"$c\" && R=\"$c\"; break; fi; "+
+			"d=$(dirname \"$d\"); done; [ -n \"$R\" ] && break; done; fi; ", d.RootMarker)
+	}
+
+	b.WriteString("printf '%s\\n' \"$R\"")
 	return b.String()
 }
 

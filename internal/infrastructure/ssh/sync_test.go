@@ -1,0 +1,230 @@
+package ssh
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/WWTLF/mycodeagent/internal/domain/entity"
+)
+
+// rsyncLines returns the rsync invocations in a generated script, in order.
+func rsyncLines(script string) []string {
+	var out []string
+	for _, line := range strings.Split(script, "\n") {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "rsync ") {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// A pull-only directory must move in exactly one direction. The engine marks
+// output pull-only because the instance is its sole author; a stray upload would
+// push local files onto the machine that generated them.
+func TestPullOnlyDirSyncsDownOnly(t *testing.T) {
+	dirs := []entity.SyncDir{{
+		RemoteCandidates: []string{"/opt/app/output"},
+		Local:            "output",
+	}}
+	script := buildSyncScript("h", 22, dirs, "/tmp/root")
+
+	lines := rsyncLines(script)
+	if len(lines) != 1 {
+		t.Fatalf("want 1 rsync for a pull-only dir, got %d:\n%s", len(lines), script)
+	}
+	// Destination last: remote source, local destination.
+	if !strings.Contains(lines[0], `root@h:"$REMOTE"/ '/tmp/root/output'/`) {
+		t.Errorf("pull-only rsync does not run remote → local: %s", lines[0])
+	}
+	// --update would mean a file whose local mtime happens to be ahead is never
+	// pulled, and for a directory the remote alone writes there is nothing to
+	// protect against.
+	if strings.Contains(lines[0], "--update") {
+		t.Errorf("pull-only rsync should not skip on local mtime: %s", lines[0])
+	}
+}
+
+// The regression this exists for: workflows were pull-only, so a workflow edited
+// locally never reached the instance that had to run it — local editing silently
+// did nothing.
+func TestPushDirSyncsBothWays(t *testing.T) {
+	dirs := []entity.SyncDir{{
+		RemoteCandidates: []string{"/opt/app/user/default/workflows"},
+		Local:            "workflows",
+		Push:             true,
+		RootMarker:       "main.py",
+	}}
+	script := buildSyncScript("h", 22, dirs, "/tmp/root")
+
+	lines := rsyncLines(script)
+	if len(lines) != 2 {
+		t.Fatalf("want 2 rsyncs for a two-way dir, got %d:\n%s", len(lines), script)
+	}
+
+	up, down := lines[0], lines[1]
+	// Up first, so a fresh instance is seeded before anything is pulled back.
+	if !strings.Contains(up, `'/tmp/root/workflows'/ root@h:"$REMOTE"/`) {
+		t.Errorf("first rsync is not local → remote: %s", up)
+	}
+	if !strings.Contains(down, `root@h:"$REMOTE"/ '/tmp/root/workflows'/`) {
+		t.Errorf("second rsync is not remote → local: %s", down)
+	}
+	for _, l := range lines {
+		if !strings.Contains(l, "--update") {
+			t.Errorf("two-way rsync without --update overwrites the newer copy: %s", l)
+		}
+	}
+}
+
+// Neither direction may delete. A resolver that lands on a different, empty
+// candidate — or a remote wipe — would otherwise erase files already pulled to
+// safety, and on the push side would erase the instance's work from a stale
+// local copy.
+func TestSyncNeverDeletes(t *testing.T) {
+	dirs := []entity.SyncDir{
+		{RemoteCandidates: []string{"/opt/app/output"}, Local: "output"},
+		{RemoteCandidates: []string{"/opt/app/wf"}, Local: "workflows", Push: true, RootMarker: "main.py"},
+	}
+	script := buildSyncScript("h", 22, dirs, "/tmp/root")
+	if strings.Contains(script, "--delete") {
+		t.Errorf("sync script deletes; accumulating is the only behaviour that cannot lose data:\n%s", script)
+	}
+}
+
+// The generated loop is handed to `sh -c` and runs unattended for the life of
+// the instance. A syntax error there is invisible until images silently stop
+// arriving.
+func TestSyncScriptIsValidShell(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no shell available")
+	}
+	dirs := []entity.SyncDir{
+		{RemoteCandidates: []string{"/opt/a/output", "/b/output"}, Local: "output"},
+		{RemoteCandidates: []string{"/opt/a/wf", "/b/wf"}, Local: "workflows", Push: true, RootMarker: "main.py"},
+	}
+	script := buildSyncScript("h", 22, dirs, "/tmp/root")
+
+	cmd := exec.Command(sh, "-n")
+	cmd.Stdin = strings.NewReader(script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("sync script is not valid shell: %v\n%s\n%s", err, out, script)
+	}
+}
+
+// runResolver executes a resolver against the real filesystem and returns what
+// it printed. The resolver is plain POSIX shell that runs on the instance, so
+// running it here tests the thing itself rather than a description of it.
+func runResolver(t *testing.T, d entity.SyncDir) string {
+	t.Helper()
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no shell available")
+	}
+	out, err := exec.Command(sh, "-c", remoteResolver(d)).Output()
+	if err != nil {
+		t.Fatalf("resolver failed: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// An existing candidate always wins, and nothing is created to reach it.
+func TestResolverPrefersAnExistingCandidate(t *testing.T) {
+	tmp := t.TempDir()
+	real := filepath.Join(tmp, "app", "output")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runResolver(t, entity.SyncDir{
+		RemoteCandidates: []string{filepath.Join(tmp, "absent", "output"), real},
+		Local:            "output",
+	})
+	if got != real {
+		t.Errorf("resolver picked %q, want the candidate that exists (%q)", got, real)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "absent", "output")); !os.IsNotExist(err) {
+		t.Error("resolver created a candidate it did not need")
+	}
+}
+
+// A two-way directory has to exist before anything can be pushed into it, and
+// ComfyUI does not create user/default/workflows until a workflow is saved in
+// the UI. For someone who only edits locally that never happens, so without
+// this the directory stays one-way forever.
+func TestResolverCreatesAPushTargetUnderTheAppRoot(t *testing.T) {
+	tmp := t.TempDir()
+	appRoot := filepath.Join(tmp, "app")
+	if err := os.MkdirAll(appRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The marker is what proves this tree is the real install.
+	if err := os.WriteFile(filepath.Join(appRoot, "main.py"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(appRoot, "user", "default", "workflows")
+
+	got := runResolver(t, entity.SyncDir{
+		RemoteCandidates: []string{want},
+		Local:            "workflows",
+		Push:             true,
+		RootMarker:       "main.py",
+	})
+	if got != want {
+		t.Fatalf("resolver returned %q, want %q", got, want)
+	}
+	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
+		t.Errorf("resolver did not create the push target: %v", err)
+	}
+}
+
+// The guard that makes creating a directory safe. A candidate list that has gone
+// stale against the image must resolve to nothing, not to a plausible-looking
+// path: a sync running for the life of the instance into somewhere nothing reads
+// looks exactly like a working sync until the work is gone.
+func TestResolverWillNotCreateOutsideAnAppRoot(t *testing.T) {
+	tmp := t.TempDir()
+	stale := filepath.Join(tmp, "wrong-layout", "user", "default", "workflows")
+
+	got := runResolver(t, entity.SyncDir{
+		RemoteCandidates: []string{stale},
+		Local:            "workflows",
+		Push:             true,
+		RootMarker:       "main.py",
+	})
+	if got != "" {
+		t.Errorf("resolver returned %q for a tree with no marker; want nothing", got)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("resolver created a directory in a tree it could not identify")
+	}
+}
+
+// A pull-only directory must never create anything remotely, marker or not — it
+// has nothing to write there, and waiting is correct until the engine writes.
+func TestResolverNeverCreatesForAPullOnlyDir(t *testing.T) {
+	tmp := t.TempDir()
+	appRoot := filepath.Join(tmp, "app")
+	if err := os.MkdirAll(appRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appRoot, "main.py"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	absent := filepath.Join(appRoot, "output")
+
+	got := runResolver(t, entity.SyncDir{
+		RemoteCandidates: []string{absent},
+		Local:            "output",
+		RootMarker:       "main.py", // set, but Push is not
+	})
+	if got != "" {
+		t.Errorf("resolver returned %q for a pull-only dir that does not exist yet", got)
+	}
+	if _, err := os.Stat(absent); !os.IsNotExist(err) {
+		t.Error("pull-only resolver created a remote directory")
+	}
+}

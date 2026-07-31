@@ -40,7 +40,8 @@ type Model struct {
 	HealthPath       string        // HTTP path for health check ("" = engine default, "skip" = no health check)
 }
 
-// SyncDir is one directory to pull off an instance before it is destroyed.
+// SyncDir is one directory kept in step between an instance and the local
+// machine.
 //
 // The whole point: instances are disposable, so anything an engine *produces*
 // dies with them. That was free when the only engine was llama.cpp, which reads
@@ -54,4 +55,30 @@ type SyncDir struct {
 	Local string
 	// Description is shown while copying.
 	Description string
+
+	// Push also sends local changes up, making the directory two-way.
+	//
+	// Off by default, because for most of what an engine writes it would be
+	// wrong: generated images only ever come *from* the instance, and uploading
+	// them back is at best pointless. It is on for directories the operator is
+	// expected to edit — workflows, above all, which are source files kept in the
+	// working directory and which have to reach the next disposable instance to
+	// be worth editing at all.
+	//
+	// Neither direction ever deletes, and both skip files the receiver has a
+	// newer copy of, so the loser of a genuine simultaneous edit is a file that
+	// did not move rather than one that was destroyed.
+	Push bool
+
+	// RootMarker is a file that identifies the application root somewhere above
+	// a candidate path — "main.py" for ComfyUI.
+	//
+	// Only Push needs it. A pull can wait for the directory to appear, but a push
+	// has nowhere to write until it does, and a workflows directory does not
+	// exist until the first workflow is saved — which, for someone who edits them
+	// locally, may be never. The marker is what makes creating it safe: it
+	// distinguishes "this tree is the real install, the leaf is merely absent"
+	// from "this candidate belongs to a layout this image does not use", where
+	// creating the path would silently sync into somewhere nothing reads.
+	RootMarker string
 }

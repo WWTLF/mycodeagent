@@ -245,6 +245,18 @@ func (e *ComfyUIEngine) HealthPath(model *entity.Model) string {
 // models/ is deliberately absent. Checkpoints are tens of gigabytes and were
 // downloaded from the internet, not produced here — copying them back over a
 // home connection would cost far more than re-fetching them.
+//
+// The two directories differ in direction, and it is not an oversight:
+//
+//   - output is generated on the instance and nowhere else. Sending local files
+//     up would upload images to the machine that made them.
+//
+//   - workflows are edited. A workflow is a source file, and the operator keeps
+//     it in the working directory across instances that each live a few hours —
+//     so it has to travel up to the next one as well as down from this one. A
+//     pull-only workflows directory means every edit made locally is invisible
+//     to the ComfyUI that has to run it, which is to say local editing does not
+//     work at all.
 func (e *ComfyUIEngine) SyncDirs(model *entity.Model) []entity.SyncDir {
 	return []entity.SyncDir{
 		{
@@ -268,6 +280,11 @@ func (e *ComfyUIEngine) SyncDirs(model *entity.Model) []entity.SyncDir {
 			},
 			Local:       "workflows",
 			Description: "saved workflows",
+			Push:        true,
+			// ComfyUI does not create this directory until a workflow is saved in
+			// the UI. Without a marker to create it against, someone who only ever
+			// edits locally would have nothing to push into.
+			RootMarker: "main.py",
 		},
 	}
 }
