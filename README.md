@@ -223,21 +223,58 @@ mycodeagent init comfyui \
   --provisioning https://raw.githubusercontent.com/WWTLF/mycodeagent/main/config/provisioning/photoreal.sh
 ```
 
-That one is in this repo at [`config/provisioning/photoreal.sh`](config/provisioning/photoreal.sh)
-— a photorealistic-portrait setup: RealVisXL V5.0 plus its Lightning variant, the
-fp16-fix SDXL VAE, and the 4x-UltraSharp upscaler. About 14 GB. Copy it and edit the
-URLs to build your own.
+That one is in this repo at [`config/provisioning/photoreal.sh`](config/provisioning/photoreal.sh).
+It holds a catalogue of 15 models and does two things with it: downloads a core set
+of four (~14 GB — RealVisXL V5.0, its Lightning variant, the fp16-fix SDXL VAE and
+the 4x-UltraSharp upscaler), and **registers all fifteen with ComfyUI-Manager** so
+the rest show up in its Model Manager and install with one click, on demand.
+Registration is a JSON entry rather than a download, which is why the catalogue can
+be long while the boot stays short. Add a line to the array to add a model.
 
 Your `HF_TOKEN` and `CIVITAI_TOKEN` (set once with `mycodeagent login`) are in the
 script's environment, so it can reach gated repos. **The script runs on a rented
 machine with those tokens available — point `--provisioning` only at a URL you
 control.**
 
-**ComfyUI-Manager**, which ships in the image. It downloads models and custom nodes
-from inside the web UI, so a missing checkpoint doesn't mean editing a script and
-redeploying — including from civitai.com, where most community portrait fine-tunes
-and LoRAs live. Anything it fetches lives only until `kill`, and it isn't synced
-back.
+**ComfyUI-Manager**, which ships in the image, for everything else — custom nodes,
+and models from its own catalogue. Anything it fetches lives only until `kill`, and
+it isn't synced back.
+
+### Why you can't just paste a link
+
+ComfyUI-Manager will not install an arbitrary URL, and no setting changes that. Its
+install endpoint calls `check_whitelist_for_model()` first, which matches the request
+against `model-list.json` on `(save_path, base, filename)`; anything absent is
+refused with *Invalid model install request*. The check runs before the security
+level is consulted, so relaxing that doesn't help.
+
+There are two supported ways in, and the provisioning script uses both:
+
+- **Add it to the catalogue** in your provisioning script. It then appears in the
+  Manager, installs on click, and comes back on every future instance.
+- **Download it straight onto a running instance**, when you have a link and don't
+  want to redeploy:
+
+  ```bash
+  ssh -p <ssh_port> root@<ssh_host> \
+    'cd /opt/workspace-internal/ComfyUI/models/checkpoints && \
+     curl -fL -H "Authorization: Bearer $CIVITAI_TOKEN" -o name.safetensors "<url>"'
+  ```
+
+  `mycodeagent ps` shows the instance; the SSH host and port are in `mycodeagent
+  info`. Hit refresh in ComfyUI afterwards and it appears in **Load Checkpoint**.
+
+The script also sets the Manager's database to `local`, because that is what makes
+the added entries *visible* — the install path reads the local list, the UI does not
+unless told to. The trade-off is that the Manager's node and model lists stop
+tracking upstream between image rebuilds; switch its DB back to "channel" in the
+Manager settings if you want the newest catalogue. Models stay installable either
+way.
+
+One caveat when installing through the Manager: its downloader reads the whole file
+into memory before writing it, so a 7 GB checkpoint wants 7 GB of free RAM. It also
+sends no `Authorization` header, so gated repos (FLUX among them) can only be
+fetched by the provisioning script, which does.
 
 ### First generation
 
