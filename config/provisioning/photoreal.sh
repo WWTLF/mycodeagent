@@ -57,7 +57,12 @@ fetch() {
         *huggingface.co*)
             [ -n "${HF_TOKEN:-}" ] && auth=(-H "Authorization: Bearer ${HF_TOKEN}")
             ;;
-        *civitai.com*)
+        # Civitai serves the same site, API and model ids from more than one
+        # domain — civitai.red returns the identical catalogue and hands out
+        # download URLs on whichever domain you asked. Matching only .com meant
+        # a .red URL silently went out with no Authorization header, so anything
+        # needing auth failed for a reason nothing in the log would explain.
+        *civitai.com*|*civitai.red*)
             [ -n "${CIVITAI_TOKEN:-}" ] && auth=(-H "Authorization: Bearer ${CIVITAI_TOKEN}")
             ;;
     esac
@@ -71,6 +76,18 @@ fetch() {
     # Progress is reported per file instead, by the log lines around this.
     if curl -fL --no-progress-meter --retry 3 --retry-delay 5 --connect-timeout 20 \
             "${auth[@]}" -o "${dest}.part" "${url}"; then
+        # -f rejects a 4xx, but not a 200 that is the wrong thing. A model host
+        # that wants credentials often *redirects* to a login page, which is a
+        # perfectly successful 200 full of HTML — and curl will happily write it
+        # out under a .safetensors name. The failure then surfaces hours later as
+        # a checkpoint ComfyUI refuses to load, with nothing in the log to say
+        # why. Cheaper to notice here.
+        if head -c 512 "${dest}.part" | grep -qiE '<!doctype html|<html[ >]'; then
+            rm -f "${dest}.part"
+            log "FAILED: ${name} — server returned an HTML page, not a model"
+            log "        (usually a login redirect: check HF_TOKEN / CIVITAI_TOKEN)"
+            return 1
+        fi
         mv "${dest}.part" "${dest}"
         log "done: ${name} ($(du -h "${dest}" | cut -f1))"
     else
