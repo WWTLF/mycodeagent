@@ -65,12 +65,14 @@ MODELS=(
 "yes|vae|SDXL|sdxl_vae_fp16_fix.safetensors|0.33GB|https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors|SDXL VAE fp16-fix|SDXL's own VAE emits black images in fp16 on some cards. This is the standard fix and what most SDXL workflows expect."
 "yes|upscale|upscale|4x-UltraSharp.pth|0.07GB|https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth|4x-UltraSharp|Takes a 1024px render to 4096 without the plastic look a plain resize gives."
 "yes|lora|SDXL|add-detail-xl.safetensors|0.23GB|https://civitai.com/api/download/models/135867|Detail Tweaker XL|Detail slider with no trigger word — positive strength sharpens skin texture and fabric, negative smooths. The person.json workflow loads it at 0.6. Cheap enough to preload."
+
 # --- SDXL, registered only -------------------------------------------------
 "no|lora|SDXL|DetailedEyes_V3.safetensors|0.09GB|https://civitai.com/api/download/models/145907|DetailedEyes XL|Fixes the dead, low-detail eyes SDXL tends to give at a distance. Stack after Detail Tweaker at ~0.5."
 "no|checkpoint|SDXL|sd_xl_base_1.0.safetensors|6.94GB|https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors|SDXL base 1.0|The unmodified base model. Worth having as a reference point when a fine-tune behaves oddly."
 "no|checkpoint|SDXL|ponyDiffusionV6XL.safetensors|6.94GB|https://civitai.com/api/download/models/290640|Pony Diffusion V6 XL|Very strong prompt adherence for characters and poses; stylised rather than photoreal. Needs its own score_9-style prompt prefix."
 "no|checkpoint|SDXL|juggernautXL_ragnarok.safetensors|7.11GB|https://civitai.com/api/download/models/1759168|Juggernaut XL|General-purpose SDXL fine-tune, strong on photographic lighting and landscapes."
 "no|checkpoint|SDXL|waiIllustriousSDXL_v170.safetensors|6.94GB|https://civitai.com/api/download/models/2883731|WAI-illustrious SDXL|Illustrious-based anime/illustration model. Not photoreal — included as the other end of the range."
+
 # --- SD1.5, registered only. Small, fast, and still the best-served -------
 # --- ecosystem for LoRAs and ControlNets ----------------------------------
 "no|checkpoint|SD1.5|realisticVisionV60B1_v51HyperVAE.safetensors|2.13GB|https://civitai.com/api/download/models/501240|Realistic Vision V6.0 B1|The long-standing SD1.5 photorealism benchmark. A quarter the size of an SDXL checkpoint and correspondingly quicker."
@@ -78,17 +80,60 @@ MODELS=(
 "no|checkpoint|SD1.5|dreamshaper_8.safetensors|2.13GB|https://civitai.com/api/download/models/128713|DreamShaper 8|Versatile SD1.5 model that holds up across photo and illustration prompts."
 "no|checkpoint|SD1.5|majicmixRealistic_v7.safetensors|2.13GB|https://civitai.com/api/download/models/176425|majicMIX realistic|SD1.5 fine-tune tuned for East Asian portraiture."
 "no|checkpoint|SD1.5|chilloutmix_NiPrunedFp32Fix.safetensors|4.27GB|https://civitai.com/api/download/models/11745|ChilloutMix|Older SD1.5 portrait model, kept because a large number of community LoRAs were trained against it."
+
 # --- FLUX text encoders ----------------------------------------------------
-# The FLUX transformers themselves are deliberately absent: both FLUX.1-dev and
-# FLUX.1-schnell are gated on HuggingFace (401 without a token), and the
-# Manager's downloader sends no Authorization header at all — see
-# manager_downloader.download_url. Registering them would put two entries in the
-# UI that fail on click. Preload them below instead, where our own fetch() does
-# send HF_TOKEN.
 "no|clip|t5|t5xxl_fp8_e4m3fn.safetensors|4.89GB|https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors|T5-XXL fp8 text encoder|Needed by FLUX. Public, unlike the FLUX transformers."
 "no|clip|FLUX.1|clip_l.safetensors|0.25GB|https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors|CLIP-L text encoder|The second of FLUX's two text encoders."
-)
 
+# --- Additional SDXL checkpoints -------------------------------------------
+"no|checkpoint|SDXL|cyberrealisticXL_v100.safetensors|6.46GB|https://civitai.com/api/download/models/2840768|CyberRealistic XL v10.0|Strong photoreal SDXL model with excellent skin texture. CFG 3-5, 30+ steps, DPM++ 2M SDE Karras."
+"no|checkpoint|SDXL|talmendoxlSDXL_v11Beta.safetensors|6.46GB|https://civitai.com/api/download/models/131960|TalmendoXL v1.1-Beta|SDXL fine-tune with natural lighting and good body variety. Uncensored."
+
+# --- Video models ----------------------------------------------------------
+#
+# Three things differ from the image models above, and all three were wrong in
+# the first cut of this section:
+#
+#   1. A repository page is not a download. https://huggingface.co/Wan-AI/... is
+#      HTML; the file lives under /resolve/main/<path>. Four of the six original
+#      entries returned a 200 full of HTML, which is exactly the case fetch()'s
+#      HTML guard exists for — the Manager would have written a web page out
+#      under a .safetensors name.
+#
+#   2. type is diffusion_model, not checkpoint. These are bare transformers, so
+#      they belong in models/diffusion_models and load through UNETLoader, not
+#      CheckpointLoaderSimple.
+#
+#   3. A transformer alone cannot generate. Each family needs its VAE and text
+#      encoder as separate files, listed here alongside it. Install the set.
+#
+# Sizes are real, and they are the binding constraint: the comfyui catalogue
+# entry asks for a 60 GB container disk, of which the image and the core set
+# above already use roughly 35 GB. Wan 5B fits. Wan 14B fp8 (two stages, 28.6 GB
+# together) does not, alongside everything else, and LTX-2.3 at 46 GB per file
+# fits nothing else at all. Raise Model.DiskGB in the catalogue before reaching
+# for those, or start from a ComfyUI instance with the core set trimmed.
+
+# Wan 2.2 TI2V 5B — the one that fits. Needs the VAE and umt5 below.
+"no|diffusion_model|Wan2.2|wan2.2_ti2v_5B_fp16.safetensors|10.0GB|https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors|Wan 2.2 TI2V 5B|Text- and image-to-video in one 5B model. The practical choice on a 60 GB disk; 14B needs a bigger one."
+"no|vae|Wan2.2|wan2.2_vae.safetensors|1.4GB|https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors|Wan 2.2 VAE|Required by every Wan 2.2 model."
+"no|clip|Wan2.2|umt5_xxl_fp8_e4m3fn_scaled.safetensors|6.7GB|https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors|UMT5-XXL fp8|Wan's text encoder. fp8 rather than the 11.4 GB fp16 to keep the set on disk."
+
+# Wan 2.2 I2V 14B, fp8. Two stages, and both are required — high noise runs the
+# early steps, low noise the late ones. 28.6 GB together, so disk first.
+"no|diffusion_model|Wan2.2|wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors|14.3GB|https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors|Wan 2.2 I2V 14B high-noise|Stage one of the 14B image-to-video pair. Useless without the low-noise half."
+"no|diffusion_model|Wan2.2|wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors|14.3GB|https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors|Wan 2.2 I2V 14B low-noise|Stage two of the 14B image-to-video pair."
+
+# HunyuanVideo 1.5 — 720p image-to-video, fp8. ~20 GB for the full set.
+"no|diffusion_model|Hunyuan1.5|hunyuanvideo1.5_720p_i2v_cfg_distilled_fp8_scaled.safetensors|8.3GB|https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/diffusion_models/hunyuanvideo1.5_720p_i2v_cfg_distilled_fp8_scaled.safetensors|HunyuanVideo 1.5 720p I2V|CFG-distilled, so it runs at CFG 1. Lighter than Wan 14B for comparable 720p output."
+"no|vae|Hunyuan1.5|hunyuanvideo15_vae_fp16.safetensors|2.5GB|https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/vae/hunyuanvideo15_vae_fp16.safetensors|HunyuanVideo 1.5 VAE|Required by HunyuanVideo 1.5."
+"no|clip|Hunyuan1.5|qwen_2.5_vl_7b_fp8_scaled.safetensors|9.4GB|https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors|Qwen2.5-VL 7B fp8|HunyuanVideo 1.5's text encoder."
+
+# LTX-2.3 22B — 46 GB per file. Listed for completeness; it does not fit the
+# current 60 GB disk next to anything, including the core set.
+"no|diffusion_model|LTX|ltx-2.3-22b-distilled.safetensors|46.1GB|https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled.safetensors|LTX-2.3 22B distilled|Joint audio-video, 4-10 steps. Needs a much larger container disk than the catalogue currently requests."
+"no|diffusion_model|LTX|ltx-2.3-22b-dev.safetensors|46.1GB|https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors|LTX-2.3 22B dev|The undistilled version. Same disk caveat."
+)
 # --- FLUX.1-dev (optional, ~24 GB) ------------------------------------------
 #
 # Beats SDXL on realism and prompt adherence, and it *is* reachable with a
