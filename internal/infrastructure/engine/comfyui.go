@@ -110,8 +110,29 @@ if [ -n "$PROVISIONING_SCRIPT" ]; then
     fi
 fi
 
-echo "Starting ComfyUI from $DIR" >> %s
-PY=$(command -v python3 || command -v python)
+# The interpreter must be the image's ComfyUI venv, not the system python.
+# ai-dock installs torch only into that venv and advertises the path in
+# COMFYUI_VENV_PYTHON; resolving with command -v python3 found
+# /usr/bin/python3 and ComfyUI died on "No module named 'torch'" every time.
+PY=""
+for cand in "$COMFYUI_VENV_PYTHON" "$COMFYUI_VENV/bin/python" \
+            /opt/environments/python/comfyui/bin/python \
+            "$DIR/venv/bin/python"; do
+    if [ -n "$cand" ] && [ -x "$cand" ] && "$cand" -c "import torch" >/dev/null 2>&1; then
+        PY="$cand"; break
+    fi
+done
+if [ -z "$PY" ]; then
+    # Last resort: whatever python can import torch at all.
+    for cand in $(command -v python3) $(command -v python); do
+        if [ -n "$cand" ] && "$cand" -c "import torch" >/dev/null 2>&1; then PY="$cand"; break; fi
+    done
+fi
+if [ -z "$PY" ]; then
+    echo "FATAL: no python with torch found (checked COMFYUI_VENV_PYTHON, $COMFYUI_VENV, system)" >> %s
+    exit 1
+fi
+echo "Starting ComfyUI from $DIR using $PY" >> %s
 cd "$DIR"
 nohup "$PY" main.py --listen 0.0.0.0 --port %d >> %s 2>&1 &
 
@@ -128,7 +149,7 @@ exit 1`,
 		comfyUILogPath,
 		comfyUILogPath, comfyUILogPath,
 		comfyUILogPath, comfyUILogPath, comfyUILogPath, comfyUILogPath, comfyUILogPath,
-		comfyUILogPath,
+		comfyUILogPath, comfyUILogPath,
 		comfyUIServerPort, comfyUILogPath,
 		comfyUIServerPort, comfyUIServerPort, comfyUILogPath,
 		comfyUIServerPort, comfyUILogPath)

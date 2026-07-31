@@ -272,3 +272,30 @@ func TestComfyUIOnstartDoesNotDependOnTheImageBootSequence(t *testing.T) {
 		t.Error("a failed provisioning script should be survivable, not fatal")
 	}
 }
+
+// ComfyUI died on "No module named 'torch'" on a live deploy: the script picked
+// the interpreter with `command -v python3`, which finds /usr/bin/python3, while
+// ai-dock installs torch only into its own virtualenv. The image advertises the
+// path in COMFYUI_VENV_PYTHON — the answer was in the environment all along.
+func TestComfyUIOnstartUsesTheVenvInterpreter(t *testing.T) {
+	onstart := NewComfyUIEngine().BuildOnstart(&entity.Model{Name: "comfyui"}, 1, 0, "")
+
+	if !strings.Contains(onstart, "COMFYUI_VENV_PYTHON") {
+		t.Error("onstart ignores COMFYUI_VENV_PYTHON, the path the image publishes")
+	}
+	// Whatever is chosen must be proven able to import torch, so a wrong guess
+	// fails at selection time with a clear message instead of at import time
+	// with a traceback the watcher has to surface.
+	if !strings.Contains(onstart, "import torch") {
+		t.Error("onstart does not verify the interpreter can import torch")
+	}
+	if !strings.Contains(onstart, "FATAL: no python with torch") {
+		t.Error("onstart has no explicit failure when no usable interpreter exists")
+	}
+	// A bare `command -v python3` as the primary choice is the actual bug.
+	venvAt := strings.Index(onstart, "COMFYUI_VENV_PYTHON")
+	sysAt := strings.Index(onstart, "command -v python3")
+	if venvAt < 0 || (sysAt >= 0 && sysAt < venvAt) {
+		t.Error("the system interpreter is consulted before the venv one")
+	}
+}
