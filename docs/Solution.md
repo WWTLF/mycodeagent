@@ -43,7 +43,7 @@ graph TD
     end
 
     subgraph "Application"
-        APP["application.App<br/><i>thin orchestration</i>"]
+        APP["application.App<br/>(thin orchestration)"]
     end
 
     subgraph "Domain Services"
@@ -73,8 +73,8 @@ graph TD
         VE["LlamaCppEngine"]
         SPI["serverprobe.Probe"]
         CST["config.Store"]
-        SQ["SQLite repos<br/><code>~/.mycodeagent/mycodeagent.db</code>"]
-        STAT["StaticModelRepository<br/><i>in-memory catalog</i>"]
+        SQ["SQLite repos<br/>~/.mycodeagent/mycodeagent.db"]
+        STAT["StaticModelRepository<br/>(in-memory catalog)"]
     end
 
     subgraph "External"
@@ -212,7 +212,7 @@ sequenceDiagram
     participant SSHTunnelProvider
     participant Remote as GPU Instance
 
-    User->>CLI: mycodeagent init <model>
+    User->>CLI: mycodeagent init MODEL
     CLI->>DeployService: Deploy(ctx, modelName)
 
     Note over DeployService: Wrap ctx with model.StartupTimeout
@@ -474,7 +474,7 @@ flowchart TD
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Searching: init <model>
+    [*] --> Searching: init MODEL
     Searching --> Creating: Offer found (verified, disk-filtered)
     Creating --> WaitingInstance: Instance created (cleanup armed)
     WaitingInstance --> WaitingSSH: Status = running
@@ -483,9 +483,9 @@ stateDiagram-v2
     Tunneling --> WaitingHealth: Tunnel established
     WaitingHealth --> Running: /v1/models 200 OK
     WaitingHealth --> Failed: Crash (/proc scan dead) / timeout
-    Running --> Stopped: stop <id>
-    Stopped --> WaitingSSH: start <id> (no download)
-    Running --> Destroyed: kill <id>
+    Running --> Stopped: stop ID
+    Stopped --> WaitingSSH: start ID (no download)
+    Running --> Destroyed: kill ID
     Failed --> Destroyed: auto-cleanup (destroy + tunnel + row)
     Stopped --> [*]
     Destroyed --> [*]
