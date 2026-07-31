@@ -152,3 +152,38 @@ func (e *ComfyUIEngine) HealthPath(model *entity.Model) string {
 	}
 	return "/history"
 }
+
+// SyncDirs lists what ComfyUI produces and therefore what must survive `kill`.
+//
+// Paths are candidates because the layout is not fixed: ai-dock ships ComfyUI
+// under /opt/ComfyUI and syncs it to $WORKSPACE (its OPT_SYNC=ComfyUI env), so
+// the live tree may be either. The same uncertainty is why BuildOnstart probes
+// five locations for main.py.
+//
+// models/ is deliberately absent. Checkpoints are tens of gigabytes and were
+// downloaded from the internet, not produced here — copying them back over a
+// home connection would cost far more than re-fetching them.
+func (e *ComfyUIEngine) SyncDirs(model *entity.Model) []entity.SyncDir {
+	return []entity.SyncDir{
+		{
+			RemoteCandidates: []string{
+				"/opt/ComfyUI/output",
+				"/workspace/ComfyUI/output",
+				"/ComfyUI/output",
+				"/root/ComfyUI/output",
+			},
+			Local:       "output",
+			Description: "generated images",
+		},
+		{
+			RemoteCandidates: []string{
+				"/opt/ComfyUI/user/default/workflows",
+				"/workspace/ComfyUI/user/default/workflows",
+				"/ComfyUI/user/default/workflows",
+				"/root/ComfyUI/user/default/workflows",
+			},
+			Local:       "workflows",
+			Description: "saved workflows",
+		},
+	}
+}

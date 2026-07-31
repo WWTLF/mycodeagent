@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -220,11 +221,48 @@ func (s *InstanceService) EstablishTunnel(ctx context.Context, vastaiID int64) (
 	inst.LocalPort = localPort
 	inst.TunnelPID = pid
 	inst.Status = entity.StatusRunning
+
+	// The output sync is restarted alongside the tunnel, not left running.
+	// `tunnel` is what you reach for after a dropped connection, and the old
+	// loop is either dead for the same reason or still pointed at the SSH
+	// endpoint vast.ai has since reassigned — either way it is copying nothing.
+	s.restartSync(inst)
+
 	if err := s.instances.Update(inst); err != nil {
 		return nil, fmt.Errorf("update instance: %w", err)
 	}
 
 	return inst, nil
+}
+
+// restartSync stops any previous loop and starts a fresh one for the instance's
+// current SSH endpoint. Best-effort: a tunnel that works is worth more than a
+// sync that does not, so failures warn rather than abort.
+func (s *InstanceService) restartSync(inst *entity.Instance) {
+	if inst.SyncPID > 0 {
+		_ = s.ssh.StopSync(inst.SyncPID)
+		inst.SyncPID = 0
+	}
+	model, err := s.models.FindByName(inst.ModelName)
+	if err != nil {
+		return // model no longer in the catalog; nothing to know about its output
+	}
+	dirs := s.engine.SyncDirs(model)
+	if len(dirs) == 0 {
+		return
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("Warning: cannot resolve working directory for sync: %v\n", err)
+		return
+	}
+	pid, root, err := s.ssh.StartSync(inst.SSHHost, inst.SSHPort, dirs, wd)
+	if err != nil {
+		fmt.Printf("Warning: output sync not restarted: %v\n", err)
+		return
+	}
+	inst.SyncPID = pid
+	fmt.Printf("Output sync restarted -> %s\n", root)
 }
 
 // ============================================================================

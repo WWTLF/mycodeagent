@@ -147,3 +147,14 @@ func (e *JupyterEngine) HealthPath(model *entity.Model) string {
 	}
 	return "/"
 }
+
+// SyncDirs pulls back the notebook workspace — the whole point of the engine.
+func (e *JupyterEngine) SyncDirs(model *entity.Model) []entity.SyncDir {
+	return []entity.SyncDir{
+		{
+			RemoteCandidates: []string{"/workspace", "/root/workspace", "/notebooks"},
+			Local:            "workspace",
+			Description:      "notebooks and data",
+		},
+	}
+}

@@ -222,3 +222,7 @@ func hasAnyFlag(args []string, flags ...string) bool {
 	}
 	return false
 }
+
+// SyncDirs is empty: llama.cpp reads weights and writes nothing worth keeping.
+// The GGUF cache is a download, not a product.
+func (e *LlamaCppEngine) SyncDirs(model *entity.Model) []entity.SyncDir { return nil }

@@ -276,6 +276,12 @@ type fakeSSH struct {
 	stoppedPIDs      []int
 	remoteOut        map[string]string // command substring → output
 	tunnelRemotePort int               // forward target of the last StartTunnel
+
+	syncPID      int
+	syncErr      error
+	syncStarts   int
+	syncDirs     []entity.SyncDir
+	stoppedSyncs []int
 }
 
 var _ SSHTunnelProvider = (*fakeSSH)(nil)
@@ -296,6 +302,36 @@ func (s *fakeSSH) lastRemotePort() int {
 	defer s.mu.Unlock()
 	return s.tunnelRemotePort
 }
+func (s *fakeSSH) StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, workDir string) (int, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.syncErr != nil {
+		return 0, "", s.syncErr
+	}
+	s.syncStarts++
+	s.syncDirs = dirs
+	return s.syncPID, workDir + "/COMFY_SYNC", nil
+}
+
+func (s *fakeSSH) StopSync(pid int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stoppedSyncs = append(s.stoppedSyncs, pid)
+	return nil
+}
+
+func (s *fakeSSH) syncStartCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.syncStarts
+}
+
+func (s *fakeSSH) stoppedSyncPIDs() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.stoppedSyncs...)
+}
+
 func (s *fakeSSH) StopTunnel(pid int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -335,6 +371,7 @@ func (s *fakeSSH) stopped() []int {
 
 type fakeEngine struct {
 	lastNumGPUs, lastContext int
+	syncDirs                 []entity.SyncDir
 	port                     int
 	env                      map[string]string
 }
@@ -350,6 +387,7 @@ func (e *fakeEngine) BuildRawCommand(m *entity.Model, numGPUs, ctxLen int) strin
 func (e *fakeEngine) RestartCommands(m *entity.Model) (string, string)            { return "kill", "start" }
 func (e *fakeEngine) LivenessCommand(m *entity.Model) string                      { return "liveness" }
 func (e *fakeEngine) DownloadedBytesCommand(m *entity.Model) string               { return "downloaded" }
+func (e *fakeEngine) SyncDirs(m *entity.Model) []entity.SyncDir                   { return e.syncDirs }
 func (e *fakeEngine) LogPath(m *entity.Model) string                              { return "/tmp/llama.log" }
 func (e *fakeEngine) ServerPort(m *entity.Model) int {
 	if e.port > 0 {

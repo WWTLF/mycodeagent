@@ -12,7 +12,7 @@ import (
 // instead of SELECT * keeps reads stable across schema migrations — it is what
 // let the now-dropped volume_id / volume_name columns sit unused for a release
 // without breaking anything.
-const instanceColumns = "id, vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, created_at, num_gpus, context_length"
+const instanceColumns = "id, vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, created_at, num_gpus, context_length, sync_pid"
 
 type SQLiteInstanceRepository struct {
 	db *sql.DB
@@ -26,10 +26,10 @@ func NewSQLiteInstanceRepository(db *sql.DB) *SQLiteInstanceRepository {
 
 func (r *SQLiteInstanceRepository) Save(inst *entity.Instance) error {
 	result, err := r.db.Exec(
-		`INSERT INTO instances (vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, num_gpus, context_length)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO instances (vastai_id, model_name, status, local_port, ssh_host, ssh_port, tunnel_pid, hourly_rate, num_gpus, context_length, sync_pid)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inst.VastaiID, inst.ModelName, inst.Status, inst.LocalPort,
-		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs, inst.ContextLength,
+		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs, inst.ContextLength, inst.SyncPID,
 	)
 	if err != nil {
 		return err
@@ -61,9 +61,9 @@ func (r *SQLiteInstanceRepository) FindRunning() ([]*entity.Instance, error) {
 func (r *SQLiteInstanceRepository) Update(inst *entity.Instance) error {
 	_, err := r.db.Exec(
 		`UPDATE instances SET vastai_id=?, model_name=?, status=?, local_port=?,
-		 ssh_host=?, ssh_port=?, tunnel_pid=?, hourly_rate=?, num_gpus=?, context_length=? WHERE id=?`,
+		 ssh_host=?, ssh_port=?, tunnel_pid=?, hourly_rate=?, num_gpus=?, context_length=?, sync_pid=? WHERE id=?`,
 		inst.VastaiID, inst.ModelName, inst.Status, inst.LocalPort,
-		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs, inst.ContextLength, inst.ID,
+		inst.SSHHost, inst.SSHPort, inst.TunnelPID, inst.HourlyRate, inst.NumGPUs, inst.ContextLength, inst.SyncPID, inst.ID,
 	)
 	return err
 }
@@ -109,7 +109,7 @@ func scanInstance(row scannable) (*entity.Instance, error) {
 	err := row.Scan(
 		&inst.ID, &inst.VastaiID, &inst.ModelName, &inst.Status,
 		&inst.LocalPort, &inst.SSHHost, &inst.SSHPort, &inst.TunnelPID,
-		&inst.HourlyRate, &inst.CreatedAt, &inst.NumGPUs, &inst.ContextLength,
+		&inst.HourlyRate, &inst.CreatedAt, &inst.NumGPUs, &inst.ContextLength, &inst.SyncPID,
 	)
 	return &inst, err
 }

@@ -39,3 +39,19 @@ type Model struct {
 	ServerPort       int           // port the service listens on inside the container (0 = engine default)
 	HealthPath       string        // HTTP path for health check ("" = engine default, "skip" = no health check)
 }
+
+// SyncDir is one directory to pull off an instance before it is destroyed.
+//
+// The whole point: instances are disposable, so anything an engine *produces*
+// dies with them. That was free when the only engine was llama.cpp, which reads
+// weights and writes nothing. ComfyUI generates images and stores workflows —
+// destroying that silently is destroying the user's work.
+type SyncDir struct {
+	// RemoteCandidates are absolute paths to try, in order. The first that
+	// exists on the instance wins.
+	RemoteCandidates []string
+	// Local is the subdirectory name created under the sync root.
+	Local string
+	// Description is shown while copying.
+	Description string
+}

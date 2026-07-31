@@ -487,3 +487,95 @@ func TestDeployCredentialsOutrankEngineEnvironment(t *testing.T) {
 		t.Errorf("engine shadowed the configured HF token: got %q", got)
 	}
 }
+
+// Instances are disposable and `kill` is the documented way to finish, so
+// anything an engine *produces* has to be copied out while it still exists.
+// That was free when llama.cpp was the only engine — it reads weights and
+// writes nothing — and stopped being free the moment ComfyUI arrived.
+func TestDeployStartsOutputSyncOnlyForEnginesThatProduce(t *testing.T) {
+	dirs := []entity.SyncDir{{RemoteCandidates: []string{"/opt/ComfyUI/output"}, Local: "output"}}
+
+	for _, tc := range []struct {
+		name      string
+		syncDirs  []entity.SyncDir
+		wantStart int
+		wantPID   int
+	}{
+		{"engine produces output", dirs, 1, 4242},
+		{"engine produces nothing", nil, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeInstanceRepo()
+			vast := &fakeVastai{offers: oneOffer(), createdID: 7}
+			ssh := &fakeSSH{tunnelPID: 1, syncPID: 4242}
+			model := testDeployModel()
+			svc := NewDeployService(
+				&fakeModelRepo{models: []*entity.Model{model}},
+				repo, newFakeBadHostRepo(), vast, ssh,
+				&fakeEngine{syncDirs: tc.syncDirs}, 8000, "",
+			)
+
+			inst, err := svc.Deploy(context.Background(), model.Name, nil)
+			if err != nil {
+				t.Fatalf("deploy: %v", err)
+			}
+			if got := ssh.syncStartCount(); got != tc.wantStart {
+				t.Errorf("StartSync called %d times, want %d", got, tc.wantStart)
+			}
+			if inst.SyncPID != tc.wantPID {
+				t.Errorf("SyncPID = %d, want %d", inst.SyncPID, tc.wantPID)
+			}
+			// Whatever happened, the pid must be persisted, or stop/kill cannot
+			// end the loop and every deploy leaks one.
+			stored, _ := repo.FindByID(inst.ID)
+			if stored.SyncPID != tc.wantPID {
+				t.Errorf("persisted SyncPID = %d, want %d", stored.SyncPID, tc.wantPID)
+			}
+		})
+	}
+}
+
+// A sync that outlives its instance keeps rsyncing against a destroyed host.
+func TestDestroyStopsTheOutputSync(t *testing.T) {
+	repo := newFakeInstanceRepo(&entity.Instance{
+		VastaiID: 9, ModelName: "test-model", SSHHost: "h", SSHPort: 22,
+		TunnelPID: 11, SyncPID: 4242,
+	})
+	ssh := &fakeSSH{}
+	svc, _ := newTestDeploy(testDeployModel(), &fakeVastai{}, ssh, repo)
+
+	if err := svc.Destroy(context.Background(), repo.ids()[0]); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	stopped := ssh.stoppedSyncPIDs()
+	if len(stopped) != 1 || stopped[0] != 4242 {
+		t.Errorf("sync loop not stopped on destroy: %v", stopped)
+	}
+}
+
+// A deploy that succeeds but cannot start the sync must still be a success —
+// the GPU is up and serving; refusing it would destroy a working instance over
+// a missing rsync.
+func TestDeploySucceedsWhenSyncCannotStart(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 7}
+	ssh := &fakeSSH{tunnelPID: 1, syncErr: fmt.Errorf("rsync not found on PATH")}
+	model := testDeployModel()
+	svc := NewDeployService(
+		&fakeModelRepo{models: []*entity.Model{model}},
+		repo, newFakeBadHostRepo(), vast, ssh,
+		&fakeEngine{syncDirs: []entity.SyncDir{{RemoteCandidates: []string{"/x"}, Local: "output"}}},
+		8000, "",
+	)
+
+	inst, err := svc.Deploy(context.Background(), model.Name, nil)
+	if err != nil {
+		t.Fatalf("a failed sync must not fail the deploy: %v", err)
+	}
+	if len(vast.destroyed) != 0 {
+		t.Errorf("instance destroyed over a sync failure: %v", vast.destroyed)
+	}
+	if inst.SyncPID != 0 {
+		t.Errorf("SyncPID = %d, want 0 when the loop never started", inst.SyncPID)
+	}
+}

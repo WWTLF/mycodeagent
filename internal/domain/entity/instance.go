@@ -39,5 +39,9 @@ type Instance struct {
 	// NumGPUs: at restart time the offer is gone, and re-emitting the baseline
 	// would silently shrink the window on a rental with fatter GPUs.
 	ContextLength int
-	CreatedAt     time.Time
+	// SyncPID is the detached rsync loop pulling the engine's output into
+	// ./COMFY_SYNC. Tracked like TunnelPID so `tunnel` can restart it and
+	// `stop`/`kill` can end it instead of leaking a process per deploy.
+	SyncPID   int
+	CreatedAt time.Time
 }

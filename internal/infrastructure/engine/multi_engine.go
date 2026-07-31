@@ -56,6 +56,10 @@ func (m *MultiEngine) DownloadedBytesCommand(model *entity.Model) string {
 	return m.engine(model).DownloadedBytesCommand(model)
 }
 
+func (m *MultiEngine) SyncDirs(model *entity.Model) []entity.SyncDir {
+	return m.engine(model).SyncDirs(model)
+}
+
 func (m *MultiEngine) LogPath(model *entity.Model) string {
 	return m.engine(model).LogPath(model)
 }
@@ -82,6 +86,7 @@ type EngineProvider interface {
 	LivenessCommand(model *entity.Model) string
 	DownloadedBytesCommand(model *entity.Model) string
 	LogPath(model *entity.Model) string
+	SyncDirs(model *entity.Model) []entity.SyncDir
 	ServerPort(model *entity.Model) int
 	HealthPath(model *entity.Model) string
 	EnvVars(model *entity.Model) map[string]string

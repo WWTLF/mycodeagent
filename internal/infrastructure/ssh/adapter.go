@@ -3,6 +3,8 @@ package ssh
 import (
 	"context"
 
+	"github.com/WWTLF/mycodeagent/internal/domain/entity"
+
 	"github.com/WWTLF/mycodeagent/internal/domain/service"
 )
 
@@ -25,6 +27,14 @@ func (a *Adapter) StartTunnel(localPort int, sshHost string, sshPort, remotePort
 
 func (a *Adapter) StopTunnel(pid int) error {
 	return StopTunnel(pid)
+}
+
+func (a *Adapter) StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, workDir string) (int, string, error) {
+	return StartSync(sshHost, sshPort, dirs, workDir)
+}
+
+func (a *Adapter) StopSync(pid int) error {
+	return StopSync(pid)
 }
 
 func (a *Adapter) WaitForSSH(ctx context.Context, host string, port int) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -67,6 +68,14 @@ type EngineProvider interface {
 	// HealthPath returns the HTTP path for the health check. Uses model.HealthPath
 	// if set, otherwise falls back to the engine default.
 	HealthPath(model *entity.Model) string
+	// SyncDirs returns the directories worth copying back before the instance is
+	// destroyed, newest-first by importance. Empty for engines that produce
+	// nothing — llama.cpp only ever reads.
+	//
+	// Remote paths are candidates, not certainties: ai-dock lays ComfyUI out
+	// differently from a plain install, so the resolver takes the first that
+	// exists on the instance rather than guessing at build time.
+	SyncDirs(model *entity.Model) []entity.SyncDir
 	// EnvVars returns engine-specific container environment. DeployService merges
 	// it with the credentials it owns (HF token), which win on a key collision.
 	//
@@ -84,6 +93,10 @@ type SSHTunnelProvider interface {
 	// llama-server, ComfyUI and Jupyter all listen on different ports.
 	StartTunnel(localPort int, sshHost string, sshPort, remotePort int) (pid int, err error)
 	StopTunnel(pid int) error
+	// StartSync launches the background rsync loop for an engine's output
+	// directories and returns its pid (0 when the engine produces nothing).
+	StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, workDir string) (pid int, root string, err error)
+	StopSync(pid int) error
 	WaitForSSH(ctx context.Context, host string, port int) error
 	RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error)
 	FindFreePort(basePort int) (int, error)
@@ -489,6 +502,11 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, countries 
 	}
 
 	deployed = true
+
+	// Only now: a sync started earlier would have copied from an instance that
+	// might still be torn down, and would have to be stopped again on failure.
+	s.startSync(inst, model)
+
 	fmt.Printf("\nAPI available at: http://localhost:%d/v1\n", localPort)
 	return inst, nil
 }
@@ -626,6 +644,47 @@ func (r *downloadReporter) report(out []byte) {
 		fmt.Printf("  downloading model: %.1f GB%s\n", float64(got)/bytesPerGB, rate)
 	}
 	r.last, r.lastAt = got, now
+}
+
+// startSync launches the background rsync loop and records its pid, if the
+// engine produces anything worth keeping. Never fatal: the deploy has already
+// succeeded, and losing the sync is worth a warning, not a teardown.
+func (s *DeployService) startSync(inst *entity.Instance, model *entity.Model) {
+	dirs := s.engine.SyncDirs(model)
+	if len(dirs) == 0 {
+		return
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("Warning: cannot resolve working directory for sync: %v\n", err)
+		return
+	}
+	pid, root, err := s.ssh.StartSync(inst.SSHHost, inst.SSHPort, dirs, wd)
+	if err != nil {
+		fmt.Printf("Warning: output sync not started: %v\n", err)
+		fmt.Printf("         Copy manually before `kill`, or the work is lost.\n")
+		return
+	}
+	inst.SyncPID = pid
+	if err := s.instances.Update(inst); err != nil {
+		fmt.Printf("Warning: sync started (pid %d) but not recorded: %v\n", pid, err)
+	}
+	names := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		names = append(names, d.Local)
+	}
+	fmt.Printf("Syncing %s to %s every %ds\n", strings.Join(names, " + "), root, 60)
+}
+
+// stopSync ends the loop for an instance, tolerating a missing one.
+func (s *DeployService) stopSync(inst *entity.Instance) {
+	if inst.SyncPID <= 0 {
+		return
+	}
+	if err := s.ssh.StopSync(inst.SyncPID); err != nil {
+		fmt.Printf("Warning: failed to stop output sync: %v\n", err)
+	}
+	inst.SyncPID = 0
 }
 
 // engineEnv builds the per-instance environment: whatever the engine asks for,
@@ -834,6 +893,7 @@ func (s *DeployService) Stop(ctx context.Context, id int64) error {
 	if err := s.ssh.StopTunnel(inst.TunnelPID); err != nil {
 		fmt.Printf("Warning: failed to stop tunnel: %v\n", err)
 	}
+	s.stopSync(inst)
 
 	if err := s.vastai.StopInstance(int(inst.VastaiID)); err != nil {
 		return fmt.Errorf("stop vast.ai instance: %w", err)
@@ -854,6 +914,10 @@ func (s *DeployService) Destroy(ctx context.Context, id int64) error {
 	if err := s.ssh.StopTunnel(inst.TunnelPID); err != nil {
 		fmt.Printf("Warning: failed to stop tunnel: %v\n", err)
 	}
+	// Before the instance goes: one last pass is not attempted here because the
+	// loop has been copying all along. Stopping it prevents an rsync racing the
+	// destroy and failing noisily against a dead host.
+	s.stopSync(inst)
 
 	if err := s.vastai.DestroyInstance(int(inst.VastaiID)); err != nil {
 		return fmt.Errorf("destroy vast.ai instance: %w", err)

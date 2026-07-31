@@ -44,7 +44,8 @@ func migrate(db *sql.DB) error {
 			hourly_rate REAL,
 			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			num_gpus    INTEGER NOT NULL DEFAULT 0,
-			context_length INTEGER NOT NULL DEFAULT 0
+			context_length INTEGER NOT NULL DEFAULT 0,
+			sync_pid       INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS bad_hosts (
 			machine_id INTEGER PRIMARY KEY,
@@ -71,6 +72,7 @@ func migrate(db *sql.DB) error {
 	for _, stmt := range []string{
 		"ALTER TABLE instances ADD COLUMN num_gpus INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE instances ADD COLUMN context_length INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE instances ADD COLUMN sync_pid INTEGER NOT NULL DEFAULT 0",
 		"DROP TABLE IF EXISTS volumes",
 		"ALTER TABLE instances DROP COLUMN volume_id",
 		"ALTER TABLE instances DROP COLUMN volume_name",
