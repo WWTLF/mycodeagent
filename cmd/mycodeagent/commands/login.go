@@ -14,7 +14,7 @@ import (
 func NewLoginCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "login",
-		Short: "Configure vast.ai API key and HuggingFace token",
+		Short: "Configure the vast.ai API key and model-download tokens",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
@@ -35,6 +35,13 @@ func NewLoginCmd(app *application.App) *cobra.Command {
 			fmt.Printf("HuggingFace token %s: ", maskKey(app.HFToken()))
 			hfTokenInput, _ := reader.ReadString('\n')
 			hfTokenInput = strings.TrimSpace(hfTokenInput)
+
+			// CivitAI is where most image-generation checkpoints and LoRAs live,
+			// and a provisioning script fetching gated ones needs this token.
+			// Blank is fine: nothing in the default catalog requires it.
+			fmt.Printf("CivitAI token %s (optional, for image models): ", maskKey(app.CivitaiToken()))
+			civitaiInput, _ := reader.ReadString('\n')
+			civitaiInput = strings.TrimSpace(civitaiInput)
 
 			// Pick the effective vast.ai key for verification: new one if
 			// supplied, otherwise the existing one. We need a non-empty key
@@ -72,6 +79,7 @@ func NewLoginCmd(app *application.App) *cobra.Command {
 			result, err := app.Login(ctx, application.LoginInput{
 				VastaiKey:       apiKeyInput,
 				HFToken:         hfTokenInput,
+				CivitaiToken:    civitaiInput,
 				UploadSSHPubKey: autoUpload,
 			})
 			if err != nil {

@@ -5,12 +5,30 @@ import (
 	"strings"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
+	"github.com/WWTLF/mycodeagent/internal/domain/service"
 	"github.com/spf13/cobra"
 )
 
 // countryHelp lists the codes worth knowing. It is not the ISO table — it is the
 // set that actually had rentable offers when this was written, because a code
 // with no machines behind it is just a way to get "no offers found".
+// provisioningHelp explains the one mechanism that makes disposable instances
+// workable for image generation: fetch the models on every boot instead of
+// carrying them.
+const provisioningHelp = `--provisioning takes the URL of a shell script the instance downloads and runs
+before its service starts. The ai-dock images (ComfyUI) support this; llama.cpp
+ignores it.
+
+It is how checkpoints and LoRAs get onto a machine that is destroyed after use:
+put the downloads in the script rather than copying weights back and forth. Set
+tokens once with 'mycodeagent login' and the script can reach gated models —
+HF_TOKEN for HuggingFace (FLUX, SD3), CIVITAI_TOKEN for civitai.com.
+
+  --provisioning https://raw.githubusercontent.com/you/yours/main/comfy.sh
+
+The script runs on your rented machine with those tokens in its environment, so
+point it only at something you control.`
+
 const countryHelp = `Restrict the offer search to these countries (ISO-3166 alpha-2, comma-separated).
 
 Offers are otherwise picked purely by price, which is how three deploys in a row
@@ -59,6 +77,7 @@ func parseCountries(raw string) ([]string, error) {
 func NewInitCmd(app *application.App) *cobra.Command {
 	var createOnly bool
 	var country string
+	var provisioning string
 
 	cmd := &cobra.Command{
 		Use:   "init <model>",
@@ -66,7 +85,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 		Long: "Rent a GPU, start llama-server and open an SSH tunnel.\n\n" +
 			"The instance is destroyed automatically if startup fails, so a broken\n" +
 			"deploy never leaves a paid GPU running.\n\n" +
-			countryHelp,
+			provisioningHelp + "\n\n" + countryHelp,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// cmd.Context() carries the SIGINT cancellation wired in main.go —
@@ -79,8 +98,10 @@ func NewInitCmd(app *application.App) *cobra.Command {
 				return err
 			}
 
+			opts := service.DeployOptions{Countries: countries, ProvisioningScript: provisioning}
+
 			if createOnly {
-				result, err := app.DeployCreateOnly(ctx, args[0], countries)
+				result, err := app.DeployCreateOnly(ctx, args[0], opts)
 				if err != nil {
 					return err
 				}
@@ -108,13 +129,14 @@ func NewInitCmd(app *application.App) *cobra.Command {
 				return nil
 			}
 
-			_, err = app.Deploy(ctx, args[0], countries)
+			_, err = app.Deploy(ctx, args[0], opts)
 			return err
 		},
 	}
 
 	cmd.Flags().BoolVar(&createOnly, "create-instance-only", false, "Create instance and show SSH details without setting up tunnel or waiting for the model server")
 	cmd.Flags().StringVar(&country, "country", "", "Comma-separated ISO-3166 alpha-2 country codes to rent in (see --help for the list)")
+	cmd.Flags().StringVar(&provisioning, "provisioning", "", "URL of a script the instance runs before starting, to fetch models (ai-dock images only)")
 
 	return cmd
 }

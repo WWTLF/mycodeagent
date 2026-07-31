@@ -72,7 +72,7 @@ func main() {
 	deploySvc := service.NewDeployService(
 		modelRepo, instanceRepo, badHostRepo,
 		vastaiAdapter, sshAdapter, multiEngine,
-		cfg.BasePort, cfg.HFToken,
+		cfg.BasePort, cfg.HFToken, cfg.CivitaiToken,
 	)
 
 	modelSvc := service.NewModelService(modelRepo)
@@ -81,7 +81,7 @@ func main() {
 	instanceSvc := service.NewInstanceService(instanceRepo, vastaiAdapter, sshAdapter, probe, modelSvc, multiEngine, cfg.BasePort)
 	credentialStore := config.NewStore()
 
-	app := application.NewApp(deploySvc, instanceSvc, modelSvc, badHostSvc, credentialStore, cfg.VastaiAPIKey, cfg.HFToken)
+	app := application.NewApp(deploySvc, instanceSvc, modelSvc, badHostSvc, credentialStore, cfg.VastaiAPIKey, cfg.HFToken, cfg.CivitaiToken)
 
 	rootCmd := &cobra.Command{
 		Use:           "mycodeagent",

@@ -103,6 +103,19 @@ type SSHTunnelProvider interface {
 	WaitForServerHealth(ctx context.Context, localPort int, healthPath string) error
 }
 
+// DeployOptions carries the per-invocation choices a deploy accepts. A struct
+// rather than more parameters: this is the third knob after the model name, and
+// two of the three are optional strings that would be easy to transpose.
+type DeployOptions struct {
+	// Countries restricts the offer search to ISO-3166 alpha-2 codes.
+	Countries []string
+	// ProvisioningScript is a URL the ai-dock images fetch and run before their
+	// service starts — the supported way to pull checkpoints and LoRAs from
+	// HuggingFace or CivitAI onto a disposable instance, so nothing large has
+	// to be synced back.
+	ProvisioningScript string
+}
+
 type OfferResult struct {
 	ID        int
 	GPUName   string
@@ -154,14 +167,15 @@ func blameHostForTimeout(provisioning time.Duration) bool {
 const diskHeadroomGB = 12
 
 type DeployService struct {
-	models    repository.ModelRepository
-	instances repository.InstanceRepository
-	badHosts  repository.BadHostRepository
-	vastai    VastaiProvider
-	ssh       SSHTunnelProvider
-	engine    EngineProvider
-	basePort  int
-	hfToken   string
+	models       repository.ModelRepository
+	instances    repository.InstanceRepository
+	badHosts     repository.BadHostRepository
+	vastai       VastaiProvider
+	ssh          SSHTunnelProvider
+	engine       EngineProvider
+	basePort     int
+	hfToken      string
+	civitaiToken string
 }
 
 func NewDeployService(
@@ -173,16 +187,18 @@ func NewDeployService(
 	engine EngineProvider,
 	basePort int,
 	hfToken string,
+	civitaiToken string,
 ) *DeployService {
 	return &DeployService{
-		models:    models,
-		instances: instances,
-		badHosts:  badHosts,
-		vastai:    vastai,
-		ssh:       ssh,
-		engine:    engine,
-		basePort:  basePort,
-		hfToken:   hfToken,
+		models:       models,
+		instances:    instances,
+		badHosts:     badHosts,
+		vastai:       vastai,
+		ssh:          ssh,
+		engine:       engine,
+		basePort:     basePort,
+		hfToken:      hfToken,
+		civitaiToken: civitaiToken,
 	}
 }
 
@@ -333,7 +349,7 @@ func scaledContextLength(model *entity.Model, offerGPUMemoryMB float64) int {
 // Deploy executes the full init flow: find offer → create instance → SSH → tunnel → health.
 // Instances are disposable: if any step after creation fails, the vast.ai instance
 // is destroyed and the tunnel killed so a failed deploy never leaves a paid GPU running.
-func (s *DeployService) Deploy(ctx context.Context, modelName string, countries []string) (*entity.Instance, error) {
+func (s *DeployService) Deploy(ctx context.Context, modelName string, opts DeployOptions) (*entity.Instance, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -356,15 +372,15 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, countries 
 	diskGB := diskFor(model)
 	minHostDisk := diskGB + diskHeadroomGB
 	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM (host disk >= %dGB%s)...\n",
-		numGPUs, model.VRAM, minHostDisk, countryNote(countries))
-	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk, countries)
+		numGPUs, model.VRAM, minHostDisk, countryNote(opts.Countries))
+	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk, opts.Countries)
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
 	offers = s.filterBadHosts(offers)
 	if len(offers) == 0 {
 		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM%s (after filtering bad hosts)",
-			numGPUs, model.VRAM, countryNote(countries))
+			numGPUs, model.VRAM, countryNote(opts.Countries))
 	}
 	offer := offers[0] // cheapest (already sorted)
 	// GPUMemory is MB; printing it as GB produced "49140GB each" on every deploy.
@@ -378,7 +394,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, countries 
 	}
 	onstart := s.engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
 
-	envVars := s.engineEnv(model)
+	envVars := s.engineEnv(model, opts)
 
 	fmt.Printf("Creating instance (disk %dGB)...\n", diskGB)
 	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(model), envVars, onstart, diskGB)
@@ -692,14 +708,22 @@ func (s *DeployService) stopSync(inst *entity.Instance) {
 //
 // Credentials are applied last and deliberately win a key collision — an engine
 // must not be able to shadow the token the user configured.
-func (s *DeployService) engineEnv(model *entity.Model) map[string]string {
+func (s *DeployService) engineEnv(model *entity.Model, opts DeployOptions) map[string]string {
 	env := map[string]string{}
+	// Engine-declared variables first, so the credentials this service owns win
+	// on a collision — an engine must not be able to shadow a token.
 	for k, v := range s.engine.EnvVars(model) {
 		env[k] = v
+	}
+	if opts.ProvisioningScript != "" {
+		env["PROVISIONING_SCRIPT"] = opts.ProvisioningScript
 	}
 	if s.hfToken != "" {
 		env["HF_TOKEN"] = s.hfToken
 		env["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
+	}
+	if s.civitaiToken != "" {
+		env["CIVITAI_TOKEN"] = s.civitaiToken
 	}
 	return env
 }
@@ -712,7 +736,7 @@ type CreateOnlyResult struct {
 // DeployCreateOnly creates the instance and waits for it to be running, but does not
 // set up the SSH tunnel or wait for server health. The instance is intentionally left
 // running so the user can attach manually — no failure cleanup here.
-func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, countries []string) (*CreateOnlyResult, error) {
+func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, opts DeployOptions) (*CreateOnlyResult, error) {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return nil, err
@@ -733,15 +757,15 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 	diskGB := diskFor(model)
 	minHostDisk := diskGB + diskHeadroomGB
 	fmt.Printf("Searching for %dx GPU with >= %dGB VRAM (host disk >= %dGB%s)...\n",
-		numGPUs, model.VRAM, minHostDisk, countryNote(countries))
-	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk, countries)
+		numGPUs, model.VRAM, minHostDisk, countryNote(opts.Countries))
+	offers, err := s.vastai.SearchOffers(model.VRAM, numGPUs, minHostDisk, opts.Countries)
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
 	offers = s.filterBadHosts(offers)
 	if len(offers) == 0 {
 		return nil, fmt.Errorf("no GPU offers found with %dx >= %dGB VRAM%s (after filtering bad hosts)",
-			numGPUs, model.VRAM, countryNote(countries))
+			numGPUs, model.VRAM, countryNote(opts.Countries))
 	}
 	offer := offers[0]
 	// GPUMemory is MB; printing it as GB produced "49140GB each" on every deploy.
@@ -752,7 +776,7 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 	onstart := s.engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
 
 	fmt.Printf("Creating instance (disk %dGB)...\n", diskGB)
-	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(model), s.engineEnv(model), onstart, diskGB)
+	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(model), s.engineEnv(model, opts), onstart, diskGB)
 	if err != nil {
 		return nil, fmt.Errorf("create instance: %w", err)
 	}

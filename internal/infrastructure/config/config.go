@@ -11,6 +11,9 @@ import (
 type Config struct {
 	VastaiAPIKey string `yaml:"vastai_api_key"`
 	HFToken      string `yaml:"hf_token"`
+	// CivitaiToken authenticates downloads from civitai.com, which is where most
+	// image-generation checkpoints and LoRAs live. Needed only for gated ones.
+	CivitaiToken string `yaml:"civitai_token"`
 	BasePort     int    `yaml:"base_port"`
 }
 
@@ -37,6 +40,9 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("HF_TOKEN"); v != "" {
 		cfg.HFToken = v
+	}
+	if v := os.Getenv("CIVITAI_TOKEN"); v != "" {
+		cfg.CivitaiToken = v
 	}
 
 	return cfg, nil

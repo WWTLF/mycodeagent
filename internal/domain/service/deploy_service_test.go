@@ -32,7 +32,7 @@ func newTestDeploy(model *entity.Model, vast *fakeVastai, ssh *fakeSSH, repo *fa
 		repo,
 		newFakeBadHostRepo(),
 		vast, ssh, eng,
-		8000, "",
+		8000, "", "",
 	), eng
 }
 
@@ -51,7 +51,7 @@ func TestDeployCleansUpLocalRowWhenHealthCheckFails(t *testing.T) {
 
 	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
 
-	inst, err := svc.Deploy(context.Background(), "test-model", nil)
+	inst, err := svc.Deploy(context.Background(), "test-model", DeployOptions{})
 	if err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
@@ -84,7 +84,7 @@ func TestDeployDestroysInstanceOnContextCancel(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := svc.Deploy(ctx, "test-model", nil)
+	_, err := svc.Deploy(ctx, "test-model", DeployOptions{})
 	if err == nil {
 		t.Fatal("expected an error after cancellation")
 	}
@@ -107,7 +107,7 @@ func TestDeployCleansUpWhenInstanceNeverStarts(t *testing.T) {
 
 	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
 
-	if _, err := svc.Deploy(context.Background(), "test-model", nil); err == nil {
+	if _, err := svc.Deploy(context.Background(), "test-model", DeployOptions{}); err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
 	if repo.count() != 0 {
@@ -133,7 +133,7 @@ func TestDeploySuccessKeepsInstanceAndPersistsRuntimeShape(t *testing.T) {
 
 	svc, eng := newTestDeploy(testDeployModel(), vast, ssh, repo)
 
-	inst, err := svc.Deploy(context.Background(), "test-model", nil)
+	inst, err := svc.Deploy(context.Background(), "test-model", DeployOptions{})
 	if err != nil {
 		t.Fatalf("deploy failed: %v", err)
 	}
@@ -196,10 +196,10 @@ func TestDeployDoesNotBlacklistOnUserCancel(t *testing.T) {
 			model := testDeployModel()
 			svc := NewDeployService(
 				&fakeModelRepo{models: []*entity.Model{model}},
-				newFakeInstanceRepo(), badHosts, vast, &fakeSSH{}, &fakeEngine{}, 8000, "",
+				newFakeInstanceRepo(), badHosts, vast, &fakeSSH{}, &fakeEngine{}, 8000, "", "",
 			)
 
-			if _, err := svc.Deploy(context.Background(), model.Name, nil); err == nil {
+			if _, err := svc.Deploy(context.Background(), model.Name, DeployOptions{}); err == nil {
 				t.Fatal("expected the deploy to fail")
 			}
 			blamed := len(badHosts.added) > 0
@@ -258,10 +258,10 @@ func TestDeployNeverBlamesHostForACrash(t *testing.T) {
 	model.StartupTimeout = 5 * time.Second // room for the watcher to reach 2 reads
 	svc := NewDeployService(
 		&fakeModelRepo{models: []*entity.Model{model}},
-		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
+		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "", "",
 	)
 
-	_, err := svc.Deploy(context.Background(), model.Name, nil)
+	_, err := svc.Deploy(context.Background(), model.Name, DeployOptions{})
 	if err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
@@ -293,10 +293,10 @@ func TestDeployBlamesHostThatAteTheBudgetProvisioning(t *testing.T) {
 	model := testDeployModel()
 	svc := NewDeployService(
 		&fakeModelRepo{models: []*entity.Model{model}},
-		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
+		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "", "",
 	)
 
-	if _, err := svc.Deploy(context.Background(), model.Name, nil); err == nil {
+	if _, err := svc.Deploy(context.Background(), model.Name, DeployOptions{}); err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
 	reason, blamed := badHosts.added[oneOffer()[0].MachineID]
@@ -318,10 +318,10 @@ func TestDeployDoesNotBlameAPromptHostForATimeout(t *testing.T) {
 	model := testDeployModel()
 	svc := NewDeployService(
 		&fakeModelRepo{models: []*entity.Model{model}},
-		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "",
+		repo, badHosts, vast, ssh, &fakeEngine{}, 8000, "", "",
 	)
 
-	if _, err := svc.Deploy(context.Background(), model.Name, nil); err == nil {
+	if _, err := svc.Deploy(context.Background(), model.Name, DeployOptions{}); err == nil {
 		t.Fatal("expected the deploy to fail")
 	}
 	if len(badHosts.added) != 0 {
@@ -441,7 +441,7 @@ func TestDeployForwardsTheTunnelToTheEnginesPort(t *testing.T) {
 			svc, eng := newTestDeploy(testDeployModel(), vast, ssh, repo)
 			eng.port = tc.port
 
-			if _, err := svc.Deploy(context.Background(), "test-model", nil); err != nil {
+			if _, err := svc.Deploy(context.Background(), "test-model", DeployOptions{}); err != nil {
 				t.Fatalf("deploy: %v", err)
 			}
 			if got := ssh.lastRemotePort(); got != tc.port {
@@ -462,7 +462,7 @@ func TestDeployPassesEngineEnvironmentToTheInstance(t *testing.T) {
 	svc, eng := newTestDeploy(testDeployModel(), vast, ssh, repo)
 	eng.env = map[string]string{"WEB_ENABLE_AUTH": "false"}
 
-	if _, err := svc.Deploy(context.Background(), "test-model", nil); err != nil {
+	if _, err := svc.Deploy(context.Background(), "test-model", DeployOptions{}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	if got := vast.createdEnv["WEB_ENABLE_AUTH"]; got != "false" {
@@ -480,7 +480,7 @@ func TestDeployCredentialsOutrankEngineEnvironment(t *testing.T) {
 	svc.hfToken = "real-token"
 	eng.env = map[string]string{"HF_TOKEN": "engine-would-shadow-this"}
 
-	if _, err := svc.Deploy(context.Background(), "test-model", nil); err != nil {
+	if _, err := svc.Deploy(context.Background(), "test-model", DeployOptions{}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	if got := vast.createdEnv["HF_TOKEN"]; got != "real-token" {
@@ -512,10 +512,10 @@ func TestDeployStartsOutputSyncOnlyForEnginesThatProduce(t *testing.T) {
 			svc := NewDeployService(
 				&fakeModelRepo{models: []*entity.Model{model}},
 				repo, newFakeBadHostRepo(), vast, ssh,
-				&fakeEngine{syncDirs: tc.syncDirs}, 8000, "",
+				&fakeEngine{syncDirs: tc.syncDirs}, 8000, "", "",
 			)
 
-			inst, err := svc.Deploy(context.Background(), model.Name, nil)
+			inst, err := svc.Deploy(context.Background(), model.Name, DeployOptions{})
 			if err != nil {
 				t.Fatalf("deploy: %v", err)
 			}
@@ -565,10 +565,10 @@ func TestDeploySucceedsWhenSyncCannotStart(t *testing.T) {
 		&fakeModelRepo{models: []*entity.Model{model}},
 		repo, newFakeBadHostRepo(), vast, ssh,
 		&fakeEngine{syncDirs: []entity.SyncDir{{RemoteCandidates: []string{"/x"}, Local: "output"}}},
-		8000, "",
+		8000, "", "",
 	)
 
-	inst, err := svc.Deploy(context.Background(), model.Name, nil)
+	inst, err := svc.Deploy(context.Background(), model.Name, DeployOptions{})
 	if err != nil {
 		t.Fatalf("a failed sync must not fail the deploy: %v", err)
 	}
@@ -577,5 +577,52 @@ func TestDeploySucceedsWhenSyncCannotStart(t *testing.T) {
 	}
 	if inst.SyncPID != 0 {
 		t.Errorf("SyncPID = %d, want 0 when the loop never started", inst.SyncPID)
+	}
+}
+
+// Credentials this service owns must survive an engine declaring the same key.
+// An engine that could shadow HF_TOKEN or CIVITAI_TOKEN would silently break
+// gated downloads, and the failure would look like a bad token.
+func TestEngineEnvCannotShadowCredentials(t *testing.T) {
+	svc := NewDeployService(
+		&fakeModelRepo{}, newFakeInstanceRepo(), newFakeBadHostRepo(),
+		&fakeVastai{}, &fakeSSH{},
+		&fakeEngine{env: map[string]string{
+			"HF_TOKEN":            "engine-tries-to-win",
+			"CIVITAI_TOKEN":       "engine-tries-to-win",
+			"PROVISIONING_SCRIPT": "engine-tries-to-win",
+			"WEB_ENABLE_AUTH":     "false",
+		}},
+		8000, "real-hf", "real-civitai",
+	)
+
+	env := svc.engineEnv(&entity.Model{}, DeployOptions{ProvisioningScript: "https://example/p.sh"})
+
+	for k, want := range map[string]string{
+		"HF_TOKEN":            "real-hf",
+		"CIVITAI_TOKEN":       "real-civitai",
+		"PROVISIONING_SCRIPT": "https://example/p.sh",
+		"WEB_ENABLE_AUTH":     "false", // engine keys with no conflict survive
+	} {
+		if env[k] != want {
+			t.Errorf("%s = %q, want %q", k, env[k], want)
+		}
+	}
+}
+
+// Tokens that were never configured must not appear at all — an empty
+// CIVITAI_TOKEN in the environment reads to a provisioning script as "a token
+// was supplied" and turns a clean 401 into a confusing one.
+func TestEngineEnvOmitsUnsetCredentials(t *testing.T) {
+	svc := NewDeployService(
+		&fakeModelRepo{}, newFakeInstanceRepo(), newFakeBadHostRepo(),
+		&fakeVastai{}, &fakeSSH{}, &fakeEngine{}, 8000, "", "",
+	)
+	env := svc.engineEnv(&entity.Model{}, DeployOptions{})
+
+	for _, k := range []string{"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "CIVITAI_TOKEN", "PROVISIONING_SCRIPT"} {
+		if _, present := env[k]; present {
+			t.Errorf("%s present despite being unset: %q", k, env[k])
+		}
 	}
 }

@@ -37,8 +37,9 @@ type App struct {
 
 	// In-memory copy of the credentials loaded at startup. Updated by Login
 	// when the user changes them. Exposed via VastaiAPIKey()/HFToken().
-	vastaiKey string
-	hfToken   string
+	vastaiKey    string
+	hfToken      string
+	civitaiToken string
 }
 
 func NewApp(
@@ -49,15 +50,17 @@ func NewApp(
 	credentials service.CredentialStore,
 	vastaiKey string,
 	hfToken string,
+	civitaiToken string,
 ) *App {
 	return &App{
-		DeploySvc:   deploySvc,
-		InstanceSvc: instanceSvc,
-		ModelSvc:    modelSvc,
-		BadHostSvc:  badHostSvc,
-		credentials: credentials,
-		vastaiKey:   vastaiKey,
-		hfToken:     hfToken,
+		DeploySvc:    deploySvc,
+		InstanceSvc:  instanceSvc,
+		ModelSvc:     modelSvc,
+		BadHostSvc:   badHostSvc,
+		credentials:  credentials,
+		vastaiKey:    vastaiKey,
+		hfToken:      hfToken,
+		civitaiToken: civitaiToken,
 	}
 }
 
@@ -71,18 +74,23 @@ func (app *App) VastaiAPIKey() string { return app.vastaiKey }
 // replacement.
 func (app *App) HFToken() string { return app.hfToken }
 
+// CivitaiToken returns the CivitAI token held in memory, for the login command
+// to display masked before prompting for a replacement.
+func (app *App) CivitaiToken() string { return app.civitaiToken }
+
 // ============================================================================
 // Deploy lifecycle
 // ============================================================================
 
-// Deploy rents a GPU and brings the model up. countries, when non-empty,
-// restricts the offer search to those ISO-3166 alpha-2 codes.
-func (app *App) Deploy(ctx context.Context, modelName string, countries []string) (*entity.Instance, error) {
-	return app.DeploySvc.Deploy(ctx, modelName, countries)
+// Deploy rents a GPU and brings the model up. opts carries the optional
+// per-invocation choices: which countries to rent in, and a provisioning script
+// URL for engines that fetch their own models.
+func (app *App) Deploy(ctx context.Context, modelName string, opts service.DeployOptions) (*entity.Instance, error) {
+	return app.DeploySvc.Deploy(ctx, modelName, opts)
 }
 
-func (app *App) DeployCreateOnly(ctx context.Context, modelName string, countries []string) (*service.CreateOnlyResult, error) {
-	return app.DeploySvc.DeployCreateOnly(ctx, modelName, countries)
+func (app *App) DeployCreateOnly(ctx context.Context, modelName string, opts service.DeployOptions) (*service.CreateOnlyResult, error) {
+	return app.DeploySvc.DeployCreateOnly(ctx, modelName, opts)
 }
 
 func (app *App) Stop(ctx context.Context, id int64) error {
@@ -212,6 +220,7 @@ func (app *App) ClearBadHosts() error {
 type LoginInput struct {
 	VastaiKey       string
 	HFToken         string
+	CivitaiToken    string
 	UploadSSHPubKey string
 }
 
@@ -252,7 +261,7 @@ func (app *App) Login(ctx context.Context, in LoginInput) (*LoginResult, error) 
 		}
 	}
 
-	if err := app.credentials.SaveCredentials(in.VastaiKey, in.HFToken); err != nil {
+	if err := app.credentials.SaveCredentials(in.VastaiKey, in.HFToken, in.CivitaiToken); err != nil {
 		return result, fmt.Errorf("save credentials: %w", err)
 	}
 
@@ -265,6 +274,9 @@ func (app *App) Login(ctx context.Context, in LoginInput) (*LoginResult, error) 
 	}
 	if in.HFToken != "" {
 		app.hfToken = in.HFToken
+	}
+	if in.CivitaiToken != "" {
+		app.civitaiToken = in.CivitaiToken
 	}
 
 	return result, nil

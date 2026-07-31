@@ -18,7 +18,7 @@ func NewStore() *Store {
 // updates only the non-empty fields, and writes back. Empty strings are
 // treated as "leave existing value alone" so the login command can update one
 // credential without disturbing the other.
-func (s *Store) SaveCredentials(apiKey, hfToken string) error {
+func (s *Store) SaveCredentials(apiKey, hfToken, civitaiToken string) error {
 	cfg, err := Load()
 	if err != nil {
 		// Load returning an error here is rare (it tolerates missing files).
@@ -30,6 +30,9 @@ func (s *Store) SaveCredentials(apiKey, hfToken string) error {
 	}
 	if hfToken != "" {
 		cfg.HFToken = hfToken
+	}
+	if civitaiToken != "" {
+		cfg.CivitaiToken = civitaiToken
 	}
 	return Save(cfg)
 }
