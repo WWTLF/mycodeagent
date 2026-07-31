@@ -62,6 +62,54 @@ import (
 // costs a whole deploy. The original 8-15 min values could not even cover the
 // provisioning phase alone on a slow host.
 var defaultModels = []*entity.Model{
+	// --- Image Generation ---
+	{
+		// 48 GB ComfyUI. The ai-dock image ships ComfyUI + ComfyUI-Manager. The
+		// image's own HTTP auth is disabled through EngineType's EnvVars — the SSH
+		// tunnel is the access control. Checkpoints are pulled on demand through
+		// the UI, so DownloadGB is 0 and there is no download progress to report.
+		//
+		// StartupTimeout is dominated by the image, not by any download: the
+		// ai-dock image is far larger than llama.cpp's ~2.6 GB compressed, and the
+		// provisioning phase alone has been measured at 9.3 minutes on a slow host
+		// with the small one. 10 minutes could not cover provisioning by itself.
+		Name:           "comfyui",
+		Alias:          "comfyui",
+		Category:       entity.CategoryImageGen,
+		EngineType:     entity.EngineComfyUI,
+		VRAM:           48,
+		NumGPUs:        1,
+		DiskGB:         60,
+		DownloadGB:     0,
+		StartupTimeout: 25 * time.Minute,
+		ServerPort:     8188,
+		HealthPath:     "/history",
+		Reasoning:      false,
+		Vision:         false,
+		ToolCalling:    false,
+	},
+	// --- Data Science ---
+	{
+		// 32 GB Jupyter + PyTorch. The vast.ai recommended PyTorch image, pre-cached
+		// on most hosts — which is why this keeps a shorter budget than ComfyUI.
+		// PyTorch is at /venv/main/. JupyterLab starts with no token: the SSH
+		// tunnel is the access control, exactly as for llama-server.
+		Name:           "jupyter-pytorch",
+		Alias:          "jupyter",
+		Category:       entity.CategoryDataScience,
+		EngineType:     entity.EngineJupyter,
+		VRAM:           32,
+		NumGPUs:        1,
+		DiskGB:         40,
+		DownloadGB:     0,
+		StartupTimeout: 15 * time.Minute,
+		ServerPort:     8888,
+		HealthPath:     "/",
+		Reasoning:      false,
+		Vision:         false,
+		ToolCalling:    false,
+	},
+	// --- Coding (llama.cpp) ---
 	{
 		// 16 GB. Dense 9B is the largest dense model that fits with real context;
 		// a 27B at the 2-bit quant it would need here is worse than a 9B at Q5.

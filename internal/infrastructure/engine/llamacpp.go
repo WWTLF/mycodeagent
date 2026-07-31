@@ -49,8 +49,13 @@ func NewLlamaCppEngine() *LlamaCppEngine {
 
 // DockerImage returns the pinned llama.cpp server image. Bump the bXXXXX build
 // number to upgrade; tags are listed at ghcr.io/ggml-org/llama.cpp.
-func (e *LlamaCppEngine) DockerImage() string {
+func (e *LlamaCppEngine) DockerImage(model *entity.Model) string {
 	return "ghcr.io/ggml-org/llama.cpp:server-cuda-b10156"
+}
+
+// EnvVars: llama.cpp needs nothing beyond the HF token DeployService adds.
+func (e *LlamaCppEngine) EnvVars(model *entity.Model) map[string]string {
+	return nil
 }
 
 func (e *LlamaCppEngine) BuildOnstart(model *entity.Model, numGPUs, contextLength int, hfToken string) string {
@@ -72,9 +77,9 @@ func (e *LlamaCppEngine) RestartCommands(model *entity.Model) (killCmd string, s
 	// subprocesses holding VRAM — so TERM, then a KILL sweep for anything that
 	// ignored it, is enough.
 	killCmd = strings.Join([]string{
-		procKill(""),
+		procKillPattern(procPattern, ""),
 		"sleep 3",
-		procKill("-9"),
+		procKillPattern(procPattern, "-9"),
 		"sleep 1",
 	}, "; ")
 	startCmd = fmt.Sprintf("nohup bash %s 2>&1 | tee %s &", scriptPath, logPath)
@@ -83,8 +88,8 @@ func (e *LlamaCppEngine) RestartCommands(model *entity.Model) (killCmd string, s
 
 // LivenessCommand returns a shell command that echoes ALIVE or DEAD depending on
 // whether llama-server is still running.
-func (e *LlamaCppEngine) LivenessCommand() string {
-	return fmt.Sprintf("grep -qs '%s' /proc/*/cmdline && echo ALIVE || echo DEAD", procPattern)
+func (e *LlamaCppEngine) LivenessCommand(model *entity.Model) string {
+	return livenessProbe(procPattern)
 }
 
 // DownloadedBytesCommand prints how many bytes of the model have landed in the
@@ -96,24 +101,29 @@ func (e *LlamaCppEngine) LivenessCommand() string {
 // counts it, which is exactly what makes this usable as a progress signal:
 // llama.cpp prints nothing at all while downloading, so the log looks identical
 // to a hang for however many minutes the GGUF takes.
-func (e *LlamaCppEngine) DownloadedBytesCommand() string {
+func (e *LlamaCppEngine) DownloadedBytesCommand(model *entity.Model) string {
 	return fmt.Sprintf("du -sb %s 2>/dev/null | cut -f1 || echo 0", cacheDir)
 }
 
 // LogPath returns the remote path the onstart script tees server output to.
-func (e *LlamaCppEngine) LogPath() string {
+func (e *LlamaCppEngine) LogPath(model *entity.Model) string {
 	return logPath
 }
 
-// procKill builds a /proc scan that signals every llama-server process. Uses no
-// procps tooling because the image doesn't ship any.
-func procKill(signal string) string {
-	sig := ""
-	if signal != "" {
-		sig = signal + " "
+// ServerPort returns the port llama-server listens on.
+func (e *LlamaCppEngine) ServerPort(model *entity.Model) int {
+	if model != nil && model.ServerPort > 0 {
+		return model.ServerPort
 	}
-	return fmt.Sprintf("for p in /proc/[0-9]*; do grep -qs '%s' $p/cmdline && kill %s${p#/proc/} 2>/dev/null; done",
-		procPattern, sig)
+	return serverPort
+}
+
+// HealthPath returns the HTTP path for the health check.
+func (e *LlamaCppEngine) HealthPath(model *entity.Model) string {
+	if model != nil && model.HealthPath != "" {
+		return model.HealthPath
+	}
+	return "/v1/models"
 }
 
 // buildScript writes the startup script executed on the instance. It resolves the

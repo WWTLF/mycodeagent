@@ -43,8 +43,8 @@ type VastaiProvider interface {
 // implementation (llama.cpp); the interface is kept so the domain layer depends
 // on an abstraction rather than the concrete infrastructure type.
 type EngineProvider interface {
-	// DockerImage returns the Docker image to use on vast.ai
-	DockerImage() string
+	// DockerImage returns the Docker image to use on vast.ai.
+	DockerImage(model *entity.Model) string
 	// BuildOnstart returns the onstart shell script for the instance.
 	// numGPUs and contextLength come from the selected offer and the scaled context
 	// computed by DeployService — they override anything in the model definition.
@@ -54,25 +54,40 @@ type EngineProvider interface {
 	// RestartCommands returns the kill and start commands for restarting the server
 	RestartCommands(model *entity.Model) (killCmd string, startCmd string)
 	// LivenessCommand returns a remote shell command that prints ALIVE or DEAD
-	// depending on whether the model server process is still running. Keeping it
-	// here means the domain never hardcodes a process name or a probing tool.
-	LivenessCommand() string
+	// depending on whether the server process is still running.
+	LivenessCommand(model *entity.Model) string
 	// DownloadedBytesCommand returns a remote shell command that prints the
-	// number of bytes fetched into the model cache so far, or 0. The cache
-	// location is engine-specific, which is why this lives behind the interface.
-	DownloadedBytesCommand() string
+	// number of bytes fetched into the model cache so far, or 0.
+	DownloadedBytesCommand(model *entity.Model) string
 	// LogPath returns the remote path the server's stdout/stderr is teed to.
-	LogPath() string
+	LogPath(model *entity.Model) string
+	// ServerPort returns the port the service listens on. Uses model.ServerPort
+	// if set, otherwise falls back to the engine default.
+	ServerPort(model *entity.Model) int
+	// HealthPath returns the HTTP path for the health check. Uses model.HealthPath
+	// if set, otherwise falls back to the engine default.
+	HealthPath(model *entity.Model) string
+	// EnvVars returns engine-specific container environment. DeployService merges
+	// it with the credentials it owns (HF token), which win on a key collision.
+	//
+	// It exists because "disable the web UI's own auth" is an engine fact, not a
+	// deploy fact: ComfyUI needs it (the SSH tunnel is the only access control
+	// here), llama.cpp has nothing to say. Without this the engine could only
+	// document the variables it needed and hope someone set them.
+	EnvVars(model *entity.Model) map[string]string
 }
 
 // SSHTunnelProvider abstracts SSH tunnel operations for the domain layer.
 type SSHTunnelProvider interface {
-	StartTunnel(localPort int, sshHost string, sshPort int) (pid int, err error)
+	// StartTunnel forwards localPort to remotePort on the instance. remotePort
+	// comes from EngineProvider.ServerPort — it is not a constant, because
+	// llama-server, ComfyUI and Jupyter all listen on different ports.
+	StartTunnel(localPort int, sshHost string, sshPort, remotePort int) (pid int, err error)
 	StopTunnel(pid int) error
 	WaitForSSH(ctx context.Context, host string, port int) error
 	RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error)
 	FindFreePort(basePort int) (int, error)
-	WaitForServerHealth(ctx context.Context, localPort int) error
+	WaitForServerHealth(ctx context.Context, localPort int, healthPath string) error
 }
 
 type OfferResult struct {
@@ -350,10 +365,10 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, countries 
 	}
 	onstart := s.engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
 
-	envVars := s.engineEnv()
+	envVars := s.engineEnv(model)
 
 	fmt.Printf("Creating instance (disk %dGB)...\n", diskGB)
-	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(), envVars, onstart, diskGB)
+	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(model), envVars, onstart, diskGB)
 	if err != nil {
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
@@ -418,7 +433,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, countries 
 	}
 
 	fmt.Printf("Starting SSH tunnel on port %d...\n", localPort)
-	tunnelPID, err = s.ssh.StartTunnel(localPort, sshHost, sshPort)
+	tunnelPID, err = s.ssh.StartTunnel(localPort, sshHost, sshPort, s.engine.ServerPort(model))
 	if err != nil {
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}
@@ -444,7 +459,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, countries 
 	healthCh := make(chan error, 1)
 	failCh := make(chan error, 1)
 	go func() {
-		healthCh <- s.ssh.WaitForServerHealth(ctx, localPort)
+		healthCh <- s.ssh.WaitForServerHealth(ctx, localPort, s.engine.HealthPath(model))
 	}()
 	// Liveness watcher: if the server process dies during startup, abort early
 	// with the tail of its log instead of polling a dead port until timeout.
@@ -494,8 +509,8 @@ func (s *DeployService) watchServerProcess(ctx context.Context, model *entity.Mo
 	ticker := time.NewTicker(livenessInterval())
 	defer ticker.Stop()
 
-	liveness := s.engine.LivenessCommand()
-	tailCmd := fmt.Sprintf("tail -n 25 %s 2>/dev/null", s.engine.LogPath())
+	liveness := s.engine.LivenessCommand(model)
+	tailCmd := fmt.Sprintf("tail -n 25 %s 2>/dev/null", s.engine.LogPath(model))
 	progress := newDownloadReporter(model)
 
 	deadCount := 0
@@ -503,7 +518,7 @@ func (s *DeployService) watchServerProcess(ctx context.Context, model *entity.Mo
 		// Same tick, second call: the model server prints nothing at all while
 		// fetching the GGUF, so without this the whole download — minutes, on a
 		// 25 GB model — is indistinguishable from a hang.
-		if bytesOut, err := s.ssh.RunRemoteCommand(sshHost, sshPort, s.engine.DownloadedBytesCommand()); err == nil {
+		if bytesOut, err := s.ssh.RunRemoteCommand(sshHost, sshPort, s.engine.DownloadedBytesCommand(model)); err == nil {
 			progress.report(bytesOut)
 		}
 
@@ -613,10 +628,16 @@ func (r *downloadReporter) report(out []byte) {
 	r.last, r.lastAt = got, now
 }
 
-// engineEnv builds the per-instance environment (HF token for gated repos /
-// higher download rate limits).
-func (s *DeployService) engineEnv() map[string]string {
+// engineEnv builds the per-instance environment: whatever the engine asks for,
+// plus the HF token for gated repos / higher download rate limits.
+//
+// Credentials are applied last and deliberately win a key collision — an engine
+// must not be able to shadow the token the user configured.
+func (s *DeployService) engineEnv(model *entity.Model) map[string]string {
 	env := map[string]string{}
+	for k, v := range s.engine.EnvVars(model) {
+		env[k] = v
+	}
 	if s.hfToken != "" {
 		env["HF_TOKEN"] = s.hfToken
 		env["HUGGING_FACE_HUB_TOKEN"] = s.hfToken
@@ -672,7 +693,7 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 	onstart := s.engine.BuildOnstart(model, offer.NumGPUs, contextLength, s.hfToken)
 
 	fmt.Printf("Creating instance (disk %dGB)...\n", diskGB)
-	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(), s.engineEnv(), onstart, diskGB)
+	instanceID, err := s.vastai.CreateInstance(offer.ID, s.engine.DockerImage(model), s.engineEnv(model), onstart, diskGB)
 	if err != nil {
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
@@ -764,7 +785,7 @@ func (s *DeployService) Start(ctx context.Context, id int64) error {
 	}
 
 	fmt.Printf("Starting SSH tunnel on port %d...\n", localPort)
-	tunnelPID, err := s.ssh.StartTunnel(localPort, sshHost, sshPort)
+	tunnelPID, err := s.ssh.StartTunnel(localPort, sshHost, sshPort, s.engine.ServerPort(model))
 	if err != nil {
 		return warn(fmt.Errorf("start tunnel: %w", err))
 	}
@@ -782,7 +803,7 @@ func (s *DeployService) Start(ctx context.Context, id int64) error {
 	fmt.Println("Waiting for model server (weights are cached on the container disk, no download)...")
 	healthCh := make(chan error, 1)
 	failCh := make(chan error, 1)
-	go func() { healthCh <- s.ssh.WaitForServerHealth(ctx, localPort) }()
+	go func() { healthCh <- s.ssh.WaitForServerHealth(ctx, localPort, s.engine.HealthPath(model)) }()
 	go s.watchServerProcess(ctx, model, sshHost, sshPort, failCh)
 
 	select {

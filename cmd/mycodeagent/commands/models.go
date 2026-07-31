@@ -61,9 +61,16 @@ func NewModelsCmd(app *application.App) *cobra.Command {
 				if p, ok := prices[m.Name]; ok {
 					priceStr = fmt.Sprintf("$%.3f", p)
 				}
+				// The empty-quant fallback only means something for a GGUF entry,
+				// where llama.cpp resolves a bare -hf to Q4_K_M. Non-llama.cpp
+				// entries (ComfyUI, Jupyter) have no repo and no quant at all, and
+				// printing a quant tag for them invented a fact.
 				quantStr := m.Quant
 				if quantStr == "" {
-					quantStr = "Q4_K_M" // llama.cpp's default when -hf carries no tag
+					quantStr = "-"
+					if m.HFRepo != "" {
+						quantStr = "Q4_K_M" // llama.cpp's default when -hf carries no tag
+					}
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.Alias, m.Name, gpuStr, ctxStr, rStr, vStr, tStr, priceStr, m.HFRepo, quantStr)
 			}

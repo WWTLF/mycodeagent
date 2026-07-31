@@ -417,3 +417,73 @@ func TestRestartFallsBackToCatalogContextForLegacyRows(t *testing.T) {
 		t.Errorf("legacy row should fall back to %d GPUs, got %d", model.NumGPUs, eng.lastNumGPUs)
 	}
 }
+
+// The regression this guards: StartTunnel hardcoded the forward target to
+// localhost:8000, llama-server's port. EngineProvider grew a ServerPort method
+// for the ComfyUI (8188) and Jupyter (8888) engines, every engine implemented
+// it, MultiEngine forwarded it — and nothing ever called it, so both new engine
+// types got a tunnel aimed at a port with nothing behind it. The deploy then
+// health-checked through that tunnel until the startup deadline and destroyed a
+// container that was serving perfectly well.
+func TestDeployForwardsTheTunnelToTheEnginesPort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		port int
+	}{
+		{"llama.cpp", 8000},
+		{"comfyui", 8188},
+		{"jupyter", 8888},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeInstanceRepo()
+			vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+			ssh := &fakeSSH{tunnelPID: 31337}
+			svc, eng := newTestDeploy(testDeployModel(), vast, ssh, repo)
+			eng.port = tc.port
+
+			if _, err := svc.Deploy(context.Background(), "test-model", nil); err != nil {
+				t.Fatalf("deploy: %v", err)
+			}
+			if got := ssh.lastRemotePort(); got != tc.port {
+				t.Errorf("tunnel forwards to remote port %d, want the engine's %d", got, tc.port)
+			}
+		})
+	}
+}
+
+// Engine-supplied environment must actually reach the container. ComfyUI's
+// "disable the web UI's own auth" variables were described in a comment and set
+// nowhere, so the image's defaults applied behind a tunnel that is already the
+// only access control.
+func TestDeployPassesEngineEnvironmentToTheInstance(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+	ssh := &fakeSSH{tunnelPID: 31337}
+	svc, eng := newTestDeploy(testDeployModel(), vast, ssh, repo)
+	eng.env = map[string]string{"WEB_ENABLE_AUTH": "false"}
+
+	if _, err := svc.Deploy(context.Background(), "test-model", nil); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if got := vast.createdEnv["WEB_ENABLE_AUTH"]; got != "false" {
+		t.Errorf("engine env did not reach CreateInstance: got %q, want \"false\"", got)
+	}
+}
+
+// ...but a credential the user configured must win, so an engine cannot shadow
+// the HF token by declaring the same key.
+func TestDeployCredentialsOutrankEngineEnvironment(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+	ssh := &fakeSSH{tunnelPID: 31337}
+	svc, eng := newTestDeploy(testDeployModel(), vast, ssh, repo)
+	svc.hfToken = "real-token"
+	eng.env = map[string]string{"HF_TOKEN": "engine-would-shadow-this"}
+
+	if _, err := svc.Deploy(context.Background(), "test-model", nil); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if got := vast.createdEnv["HF_TOKEN"]; got != "real-token" {
+		t.Errorf("engine shadowed the configured HF token: got %q", got)
+	}
+}

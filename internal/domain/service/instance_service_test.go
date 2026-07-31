@@ -9,9 +9,14 @@ import (
 )
 
 func newTestInstanceSvc(repo *fakeInstanceRepo, vast *fakeVastai, ssh *fakeSSH) *InstanceService {
+	return newTestInstanceSvcWithEngine(repo, vast, ssh, &fakeEngine{})
+}
+
+func newTestInstanceSvcWithEngine(repo *fakeInstanceRepo, vast *fakeVastai, ssh *fakeSSH, eng EngineProvider) *InstanceService {
 	return NewInstanceService(
 		repo, vast, ssh, &fakeProbe{},
 		NewModelService(&fakeModelRepo{}),
+		eng,
 		8000,
 	)
 }

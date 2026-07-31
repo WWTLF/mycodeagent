@@ -15,8 +15,8 @@ func NewAdapter() *Adapter {
 	return &Adapter{}
 }
 
-func (a *Adapter) StartTunnel(localPort int, sshHost string, sshPort int) (int, error) {
-	t, err := StartTunnel(localPort, sshHost, sshPort)
+func (a *Adapter) StartTunnel(localPort int, sshHost string, sshPort, remotePort int) (int, error) {
+	t, err := StartTunnel(localPort, sshHost, sshPort, remotePort)
 	if err != nil {
 		return 0, err
 	}
@@ -39,6 +39,6 @@ func (a *Adapter) FindFreePort(basePort int) (int, error) {
 	return FindFreePort(basePort)
 }
 
-func (a *Adapter) WaitForServerHealth(ctx context.Context, localPort int) error {
-	return WaitForServerHealth(ctx, localPort)
+func (a *Adapter) WaitForServerHealth(ctx context.Context, localPort int, healthPath string) error {
+	return WaitForServerHealth(ctx, localPort, healthPath)
 }

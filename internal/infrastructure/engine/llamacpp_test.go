@@ -120,7 +120,7 @@ func TestServeArgsSplitMode(t *testing.T) {
 // the probe at the wrong directory would report 0 bytes forever, i.e. exactly the
 // "looks hung" symptom it exists to remove.
 func TestDownloadedBytesCommandReadsTheHuggingFaceCache(t *testing.T) {
-	cmd := NewLlamaCppEngine().DownloadedBytesCommand()
+	cmd := NewLlamaCppEngine().DownloadedBytesCommand(testModel())
 
 	if !strings.Contains(cmd, "/root/.cache/huggingface") {
 		t.Errorf("probe does not read the HF cache: %s", cmd)
@@ -196,7 +196,7 @@ func TestProcessCommandsAvoidProcpsAndSelfMatch(t *testing.T) {
 	killCmd, startCmd := e.RestartCommands(testModel())
 
 	for name, cmd := range map[string]string{
-		"LivenessCommand": e.LivenessCommand(),
+		"LivenessCommand": e.LivenessCommand(testModel()),
 		"killCmd":         killCmd,
 	} {
 		if strings.Contains(cmd, "pgrep") || strings.Contains(cmd, "pkill") || strings.Contains(cmd, "ps -") {
@@ -216,7 +216,7 @@ func TestProcessCommandsAvoidProcpsAndSelfMatch(t *testing.T) {
 	}
 
 	// The progress probe runs on the same bare image and must obey the same rules.
-	if dl := e.DownloadedBytesCommand(); strings.Contains(dl, "pgrep") || strings.Contains(dl, "pkill") {
+	if dl := e.DownloadedBytesCommand(testModel()); strings.Contains(dl, "pgrep") || strings.Contains(dl, "pkill") {
 		t.Errorf("DownloadedBytesCommand uses procps tooling: %s", dl)
 	}
 

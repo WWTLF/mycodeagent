@@ -2,7 +2,7 @@
 
 ## Overview
 
-`mycodeagent init <model>` deploys a model on a vast.ai GPU instance and exposes it as an OpenAI-compatible API on localhost. **llama.cpp is the only engine** (`ghcr.io/ggml-org/llama.cpp:server-cuda-*`); every catalog model is a GGUF quant fetched by `llama-server -hf <repo>:<quant>`. The entire startup is governed by a single `context.Context` with a per-model timeout (default 20 min; 16–30 min in the current catalog).
+`mycodeagent init <model>` deploys a catalog entry on a vast.ai GPU instance and exposes it on localhost through an SSH tunnel. **llama.cpp is the default engine** (`ghcr.io/ggml-org/llama.cpp:server-cuda-*`), serving an OpenAI-compatible API; every *coding* catalog model is a GGUF quant fetched by `llama-server -hf <repo>:<quant>`. Two non-LLM engines share the same lifecycle — ComfyUI for image generation and Jupyter+PyTorch for notebooks — selected per entry by `EngineType`. The entire startup is governed by a single `context.Context` with a per-model timeout (default 20 min; 16–30 min in the current catalog).
 
 **Why llama.cpp and not vLLM.** This is a single-user, pay-as-you-go environment with no concurrent load, and vLLM's advantages — continuous batching, PagedAttention scheduling — only pay off at concurrency ≫ 1. What it charges for instead is exactly what costs money here: a ~15 GB image pull on every disposable `init`, a minute or two of `torch.compile` + CUDA-graph capture, and FP8 weights too large for one card. Swapping to 4-bit GGUF put every catalog model back on a **single** GPU (see the table below), which roughly halves the hourly rate and widens the pool of usable offers. The tradeoffs accepted in exchange are documented under [Engine tradeoffs](#engine-tradeoffs).
 
@@ -162,40 +162,63 @@ All interfaces live in `internal/domain/service/` so the domain layer never impo
 |---|---|---|
 | **`VastaiProvider`** | Vast.ai REST: search offers (with min host-disk filter), create/wait/destroy instances, instance read access (`GetInstance`, `ListRemoteInstances`, `GetInstanceLogs`), credential operations (`VerifyAPIKey`, `ListSSHKeys`, `CreateSSHKey`). Returns `service.RemoteInstance` DTOs, never raw `vastai.InstanceInfo`. | `vastai.Adapter` |
 | **`SSHTunnelProvider`** | SSH operations: `StartTunnel`, `StopTunnel`, `WaitForSSH`, `FindFreePort`, `RunRemoteCommand`, `WaitForServerHealth`. | `ssh.Adapter` |
-| **`EngineProvider`** | Engine-specific deploy details (Docker image, onstart script, restart commands, liveness probe, log path). Single implementation. | `engine.LlamaCppEngine` |
+| **`EngineProvider`** | Engine-specific deploy details (Docker image, onstart script, restart commands, liveness probe, log path, service port, health path, container env). | `engine.MultiEngine`, dispatching to `LlamaCppEngine` / `ComfyUIEngine` / `JupyterEngine` |
 | **`ServerProbe`** | Localhost HTTP probe: `/v1/models` for the served model id, then `/props` for the real `n_ctx`. Best-effort. | `serverprobe.Probe` |
 | **`CredentialStore`** | Persists vast.ai key + HF token. Used only by `App.Login`. | `config.Store` |
 
 ### Engine Provider
 
-`EngineProvider` abstracts llama.cpp-specific deployment details. There is one implementation, but the interface is kept so the domain depends on an abstraction rather than the concrete type. Signature (in `internal/domain/service/deploy_service.go`):
+`EngineProvider` abstracts engine-specific deployment details. `MultiEngine` is the single implementation the domain sees; it routes on `model.EngineType` and treats an unset type as llama.cpp, so every catalog row written before the split keeps working. Signature (in `internal/domain/service/deploy_service.go`):
 
 ```go
 type EngineProvider interface {
-    DockerImage() string
+    DockerImage(model *entity.Model) string
     // numGPUs and contextLength come from the selected offer and the scaled
     // context computed by DeployService — they override anything in the model
     // definition so the search filter and the launched server stay in sync.
     BuildOnstart(model *entity.Model, numGPUs, contextLength int, hfToken string) string
     BuildRawCommand(model *entity.Model, numGPUs, contextLength int) string
     RestartCommands(model *entity.Model) (killCmd string, startCmd string)
-    // LivenessCommand prints ALIVE or DEAD; LogPath is where the server log is
-    // teed. Both live here so DeployService never hardcodes a process name,
-    // a probing tool or a path.
-    LivenessCommand() string
-    LogPath() string
+    // LivenessCommand prints ALIVE or DEAD; LogPath is where the log is teed.
+    // Both live here so DeployService never hardcodes a process name, a probing
+    // tool or a path.
+    LivenessCommand(model *entity.Model) string
+    DownloadedBytesCommand(model *entity.Model) string
+    LogPath(model *entity.Model) string
+    // ServerPort is the forward target StartTunnel needs; HealthPath is what
+    // WaitForServerHealth polls. Both fall back to the engine default when the
+    // catalog entry does not override them.
+    ServerPort(model *entity.Model) int
+    HealthPath(model *entity.Model) string
+    // EnvVars is engine-specific container environment, merged under the
+    // credentials DeployService owns.
+    EnvVars(model *entity.Model) map[string]string
 }
 ```
 
-| Engine | Docker Image | Model Format | Server Port |
-|---|---|---|---|
-| **LlamaCppEngine** | `ghcr.io/ggml-org/llama.cpp:server-cuda-b10156` | GGUF (`-hf <repo>:<quant>`) | 8000 |
+| Engine | `EngineType` | Docker Image | Server Port | Health |
+|---|---|---|---|---|
+| **LlamaCppEngine** | `llamacpp` (default) | `ghcr.io/ggml-org/llama.cpp:server-cuda-b10156` | 8000 | `/v1/models` |
+| **ComfyUIEngine** | `comfyui` | `ghcr.io/ai-dock/comfyui:cuda-12.8.1-runtime-ubuntu24.04` | 8188 | `/history` |
+| **JupyterEngine** | `jupyter` | `vastai/pytorch:cuda12` | 8888 | `/` |
+
+#### Three rules a new engine has to obey
+
+Every one of these was violated by the first cut of the ComfyUI and Jupyter engines, and each cost a whole deploy rather than producing an error.
+
+1. **The service port must reach the tunnel.** `StartTunnel` took no remote port and forwarded to `localhost:8000` — llama.cpp's. `ServerPort` existed on the interface, was implemented by all three engines and forwarded by `MultiEngine`, and was called by nothing, so ComfyUI and Jupyter got tunnels aimed at a closed port. The deploy then health-checked through that tunnel until its deadline and destroyed a container that was serving fine. `TestDeployForwardsTheTunnelToTheEnginesPort` locks it.
+
+2. **Process patterns must not match themselves.** The grep text lands in the argv of the shell running it, and `/proc/<pid>/cmdline` covers that shell, so a bare `jupyter` made the liveness probe report ALIVE with nothing running and made the kill sweep signal its own SSH session. Bracket one character — `jupyte[r]`, `llama-serve[r]`, `mai[n]\.py`. The filename counts too: a script at `/tmp/start_jupyter.sh` puts the name in argv just as effectively, which is why the scripts are `start_lab.sh` and `start_cui.sh`. `TestLivenessCommandsAreSelfMatchSafe` proves it by execution — it rewrites the probe to scan only `/proc/self/cmdline` and requires DEAD.
+
+3. **The onstart script must be able to fail.** vast.ai replaces the image `ENTRYPOINT` for `runtype: "ssh"`, so nothing starts on its own; ComfyUI's script polled for a supervisord that could never run and then exited 0 regardless. A script that cannot report failure turns "the container started nothing" into "healthy" and hands the difference to the startup deadline. Both scripts now resolve their binary at runtime, `exit 1` with a `FATAL` line the watcher's log tail will show, and are guarded by `TestOnstartScriptsFailLoudlyWhenTheServiceNeverAnswers`.
+
+`EnvVars` exists for the same reason as the rest: ComfyUI has to disable the image's own HTTP auth, since the SSH tunnel is the only access control and a login prompt on a single-user tunnel just locks the operator out. `DeployService` merges it under the credentials it owns, so an engine cannot shadow the configured HF token.
 
 #### Image constraints worth knowing
 
 The image is deliberately minimal — `nvidia/cuda:12.8.1-runtime-ubuntu24.04` plus `libgomp1 curl ffmpeg` — and three properties of it leak into the design:
 
-1. **No procps.** `pgrep`/`pkill`/`ps` are not installed. The liveness probe and the restart kill sweep therefore scan `/proc/*/cmdline` with `grep`. The match pattern is written `llama-serve[r]`, because the command text itself lands in the argv of the shell that runs it: an unbracketed pattern would make the probe always report ALIVE and make the kill sweep shoot its own SSH session. `engine.TestProcessCommandsAvoidProcpsAndSelfMatch` locks both properties in.
+1. **No procps.** `pgrep`/`pkill`/`ps` are not installed. The liveness probe and the restart kill sweep therefore scan `/proc/*/cmdline` with `grep`. The match pattern is written `llama-serve[r]`, because the command text itself lands in the argv of the shell that runs it: an unbracketed pattern would make the probe always report ALIVE and make the kill sweep shoot its own SSH session. `engine.TestProcessCommandsAvoidProcpsAndSelfMatch` locks both properties in for llama.cpp, and `engine.TestLivenessCommandsAreSelfMatchSafe` / `TestKillSweepsDoNotMatchThemselves` extend them to every engine — the ComfyUI and Jupyter engines shipped violating the rule precisely because the original test named one engine.
 2. **`/app` is not on `PATH`.** Only the image `ENTRYPOINT` relies on `WORKDIR=/app`, and vast.ai replaces the entrypoint for `runtype: "ssh"`. The onstart script resolves the binary itself, preferring a `PATH` hit and falling back to `/app/llama-server`, then `cd`s beside it — the CUDA build uses `GGML_BACKEND_DL`, so the ggml backend `.so` files sit next to the binary.
 3. **CUDA 12.8.1.** That is exactly the `cuda_max_good >= 12.8` floor the offer search filters on. Bumping the image to a newer CUDA base requires bumping that filter in `vastai/client.go`, or deploys land on hosts whose driver cannot run the runtime (consumer GPUs have no CUDA forward compat).
 
@@ -504,7 +527,20 @@ graph LR
 - Each `init` allocates a new local port (starting from `basePort`, scanning +100).
 - Tunnel runs as a background `ssh -N -L` process; PID saved to SQLite.
 - **`StartTunnel` returns only once the forward accepts connections.** It used to `Start()` the process and report success immediately, so an ssh that died on the spot — rejected key, refused forward — still yielded a PID. The deploy then polled a local port with nothing behind it until its deadline, and the dead ssh lingered as a zombie because nobody reaped it. A `cmd.Wait()` goroutine now both reaps the child and surfaces an instant exit, and the function dials the local port before claiming success.
-- **`WaitForSSH` authenticates, it does not merely dial.** vast.ai answers on the forwarded SSH port well before the instance accepts a key — and sometimes never accepts it: a host was observed answering TCP while every exchange returned `Permission denied (publickey)`, its sshd reporting a different OpenSSH build than the container runs. A TCP-only check passed that host and cost a whole deploy. The probe runs a real command over the same `baseArgs` the tunnel uses, so it proves what the tunnel needs; it keeps retrying to the deadline, which preserves the tolerant behaviour for the normal case where `authorized_keys` takes a few seconds to land. A failure here is host-side, so the machine is blacklisted — which is what the old check silently skipped.
+- **`WaitForSSH` authenticates, it does not merely dial.** vast.ai answers on the forwarded SSH port well before the instance accepts a key — and sometimes never accepts it: a host was observed answering TCP while every exchange returned `Permission denied (publickey)`, its sshd reporting a different OpenSSH build than the container runs. A TCP-only check passed that host and cost a whole deploy. The probe runs a real command over the same `baseArgs` the tunnel uses, so it proves what the tunnel needs. A failure here is host-side, so the machine is blacklisted — which is what the old check silently skipped.
+- **A rejected key is a verdict, not a race — after 3 minutes.** Retrying to the deadline made every SSH failure cost the *whole* startup budget. Machine 55264 refused `Permission denied (publickey)` for 28 minutes while the model sat fully downloaded and `llama-server` served happily on `:8000`; its `/root/.ssh/authorized_keys` had ownership or modes sshd would not accept. `WaitForSSH` therefore ends the deploy once the host has been refusing the key for `authGracePeriod` (3 min), returning `ssh.ErrKeyRejected` so callers act on the diagnosis instead of parsing prose. Everything else — refused, timed out, connection closed — still retries to the deadline, so the tolerance for an `authorized_keys` that lands late is intact.
+
+  **The clock starts at the first rejection and never resets.** Two separate mistakes are being avoided. Starting it at deploy time would charge the key for the minutes a booting container spends refusing TCP, before sshd has offered publickey at all — that is not evidence about a key nobody has been asked about. Resetting it on a non-rejection (the first cut of this fix) means one dropped connection from vast.ai's shared ssh proxy restarts the countdown, which reinstates the full-deadline burn on exactly the flaky hosts this exists to catch.
+
+  **Why 3 minutes and not 90 seconds.** The errors are not symmetric, the same asymmetry that makes the startup timeouts generous. Waiting 90 s too long costs 90 s; giving up 90 s too early destroys a working deploy *and* blacklists a machine that was only slow. `WaitForInstance` returns the moment vast.ai reports `actual_status: running`, and nothing here measures how much later the key registration actually completes — so the margin is a guess and is deliberately a generous one. It also has to clear the 2-minute budget `InstanceService.EstablishTunnel` wraps around `WaitForSSH`, or `mycodeagent tunnel` would inherit a deploy-shaped verdict it never asked for.
+
+  **The cause never reaches the client**, which is why finality is inferred from persistence rather than matched on a string. sshd's real reason — `Authentication refused: bad ownership or modes for file /root/.ssh/authorized_keys` — goes to the **server's** log, retrievable only through the vast.ai logs API.
+
+  **Known limit: this cannot tell a bad host from a bad local key.** An unregistered or passphrase-protected key is refused by every machine identically, and each refusal now blacklists a healthy host in 3 minutes instead of 30 — the same wrong outcome, arriving 10× faster. `bad_hosts` has no expiry, so the pool drains until `hosts --clear`. The error says so and points at `mycodeagent login`; detecting it properly means noticing that *different* machines rejected the same key, which `DeployService` has the machine IDs to do and does not yet.
+
+  Failing fast also closes a Ctrl-C gap. Blacklisting is deliberately skipped on `context.Canceled` (19b18fc), so an operator who interrupts a hopeless deploy before its deadline leaves the bad host in the pool — exactly what happened with 55264. A 3-minute verdict is one few people sit through the urge to interrupt.
+- **`WaitForSSH` reports why it is still waiting**, every 30 s, echoing ssh's own last line: `still waiting for SSH after 30s: root@ssh1.vast.ai: Permission denied (publickey).` Before this, `Waiting for SSH...` was the last output a deploy produced before going quiet for as long as its deadline allowed. The download reporter cannot cover that stretch — it runs over SSH, so `watchServerProcess` is only spawned *after* the tunnel is up — which is why a 28-minute SSH failure printed nothing at all and read as a hang. Echoing the reason also makes the wait self-diagnosing: `Permission denied (publickey)` and `Connection refused` call for completely different responses.
+- **Two permanent ssh failures are prevented outright rather than detected**, in `baseArgs`. vast.ai hands out `ssh1.vast.ai:PORT` from a pool, so a remembered host key comes back attached to a different instance and ssh hard-fails with `REMOTE HOST IDENTIFICATION HAS CHANGED` — which `StrictHostKeyChecking=no` does *not* cover, as it only waives *unknown* hosts. `UserKnownHostsFile=/dev/null` removes the failure; none of these boxes outlives a session anyway. And `IdentitiesOnly=yes` (set only alongside `-i`) stops ssh offering every key an agent holds ahead of ours: past six the server disconnects with `Too many authentication failures` before ours is tried.
 - Every ssh invocation is capped by `remoteCommandTimeout`. `ConnectTimeout` bounds only the TCP connect, so a peer that accepts and then never completes the handshake left ssh hanging, and `WaitForSSH` — which can only test its context between attempts — overran its deadline.
 - `stop` SIGTERMs the tunnel PID, then stops the vast.ai instance; `start` resumes it and opens a *new* tunnel (the SSH endpoint is reassigned); `kill` destroys the instance + tunnel.
 - `restart` regenerates the onstart script on the instance and restarts the server.

@@ -26,6 +26,7 @@ type InstanceService struct {
 	ssh       SSHTunnelProvider
 	probe     ServerProbe
 	models    *ModelService
+	engine    EngineProvider
 	basePort  int
 }
 
@@ -56,6 +57,7 @@ func NewInstanceService(
 	ssh SSHTunnelProvider,
 	probe ServerProbe,
 	models *ModelService,
+	engine EngineProvider,
 	basePort int,
 ) *InstanceService {
 	return &InstanceService{
@@ -64,8 +66,24 @@ func NewInstanceService(
 		ssh:       ssh,
 		probe:     probe,
 		models:    models,
+		engine:    engine,
 		basePort:  basePort,
 	}
+}
+
+// remotePort resolves the port the instance's service listens on.
+//
+// Falls back to the engine's default for an unknown model rather than failing:
+// re-attaching a tunnel to an instance whose catalog entry has since been
+// renamed should still work, and every engine answers ServerPort(nil-model) with
+// its own default. Returning 0 is also safe — StartTunnel treats it as "use the
+// llama.cpp port", which is what every pre-multi-engine row wants.
+func (s *InstanceService) remotePort(modelName string) int {
+	model, err := s.models.FindByName(modelName)
+	if err != nil {
+		return 0
+	}
+	return s.engine.ServerPort(model)
 }
 
 // ============================================================================
@@ -117,7 +135,7 @@ func (s *InstanceService) StartTunnel(ctx context.Context, instanceID int64, loc
 		localPort = port
 	}
 
-	pid, err := s.ssh.StartTunnel(localPort, inst.SSHHost, inst.SSHPort)
+	pid, err := s.ssh.StartTunnel(localPort, inst.SSHHost, inst.SSHPort, s.remotePort(inst.ModelName))
 	if err != nil {
 		return 0, fmt.Errorf("start tunnel: %w", err)
 	}
@@ -192,7 +210,7 @@ func (s *InstanceService) EstablishTunnel(ctx context.Context, vastaiID int64) (
 		return nil, err
 	}
 
-	pid, err := s.ssh.StartTunnel(localPort, sshHost, sshPort)
+	pid, err := s.ssh.StartTunnel(localPort, sshHost, sshPort, s.remotePort(inst.ModelName))
 	if err != nil {
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}

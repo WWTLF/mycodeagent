@@ -67,18 +67,18 @@ func main() {
 	vastaiAdapter := vastai.NewAdapter(cfg.VastaiAPIKey)
 	sshAdapter := ssh.NewAdapter()
 
-	llamaEngine := engine.NewLlamaCppEngine()
+	multiEngine := engine.NewMultiEngine()
 
 	deploySvc := service.NewDeployService(
 		modelRepo, instanceRepo, badHostRepo,
-		vastaiAdapter, sshAdapter, llamaEngine,
+		vastaiAdapter, sshAdapter, multiEngine,
 		cfg.BasePort, cfg.HFToken,
 	)
 
 	modelSvc := service.NewModelService(modelRepo)
 	badHostSvc := service.NewBadHostService(badHostRepo)
 	probe := serverprobe.New()
-	instanceSvc := service.NewInstanceService(instanceRepo, vastaiAdapter, sshAdapter, probe, modelSvc, cfg.BasePort)
+	instanceSvc := service.NewInstanceService(instanceRepo, vastaiAdapter, sshAdapter, probe, modelSvc, multiEngine, cfg.BasePort)
 	credentialStore := config.NewStore()
 
 	app := application.NewApp(deploySvc, instanceSvc, modelSvc, badHostSvc, credentialStore, cfg.VastaiAPIKey, cfg.HFToken)

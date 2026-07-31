@@ -199,6 +199,7 @@ type fakeVastai struct {
 	waitDelay time.Duration // simulated provisioning time
 
 	searchedCountries []string
+	createdEnv        map[string]string
 
 	destroyed  []int
 	destroyErr error
@@ -214,6 +215,7 @@ func (v *fakeVastai) SearchOffers(minGPURAM, numGPUs, minDiskGB int, countries [
 	return v.offers, nil
 }
 func (v *fakeVastai) CreateInstance(offerID int, image string, env map[string]string, onstart string, diskGB int) (int, error) {
+	v.createdEnv = env
 	if v.createErr != nil {
 		return 0, v.createErr
 	}
@@ -271,17 +273,28 @@ type fakeSSH struct {
 	healthErr  error
 	healthWait time.Duration // block this long before returning healthErr
 
-	stoppedPIDs []int
-	remoteOut   map[string]string // command substring → output
+	stoppedPIDs      []int
+	remoteOut        map[string]string // command substring → output
+	tunnelRemotePort int               // forward target of the last StartTunnel
 }
 
 var _ SSHTunnelProvider = (*fakeSSH)(nil)
 
-func (s *fakeSSH) StartTunnel(localPort int, host string, port int) (int, error) {
+func (s *fakeSSH) StartTunnel(localPort int, host string, port, remotePort int) (int, error) {
+	s.mu.Lock()
+	s.tunnelRemotePort = remotePort
+	s.mu.Unlock()
 	if s.startErr != nil {
 		return 0, s.startErr
 	}
 	return s.tunnelPID, nil
+}
+
+// lastRemotePort reports the forward target of the most recent StartTunnel.
+func (s *fakeSSH) lastRemotePort() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tunnelRemotePort
 }
 func (s *fakeSSH) StopTunnel(pid int) error {
 	s.mu.Lock()
@@ -301,7 +314,7 @@ func (s *fakeSSH) RunRemoteCommand(host string, port int, cmd string) ([]byte, e
 	return []byte("ALIVE"), nil
 }
 func (s *fakeSSH) FindFreePort(basePort int) (int, error) { return basePort, nil }
-func (s *fakeSSH) WaitForServerHealth(ctx context.Context, localPort int) error {
+func (s *fakeSSH) WaitForServerHealth(ctx context.Context, localPort int, healthPath string) error {
 	if s.healthWait > 0 {
 		select {
 		case <-ctx.Done():
@@ -322,20 +335,30 @@ func (s *fakeSSH) stopped() []int {
 
 type fakeEngine struct {
 	lastNumGPUs, lastContext int
+	port                     int
+	env                      map[string]string
 }
 
 var _ EngineProvider = (*fakeEngine)(nil)
 
-func (e *fakeEngine) DockerImage() string { return "test/image:1" }
+func (e *fakeEngine) DockerImage(m *entity.Model) string { return "test/image:1" }
 func (e *fakeEngine) BuildOnstart(m *entity.Model, numGPUs, ctxLen int, hfToken string) string {
 	e.lastNumGPUs, e.lastContext = numGPUs, ctxLen
 	return fmt.Sprintf("echo 'script ctx=%d gpus=%d' > /tmp/s.sh && bash /tmp/s.sh", ctxLen, numGPUs)
 }
 func (e *fakeEngine) BuildRawCommand(m *entity.Model, numGPUs, ctxLen int) string { return "run" }
 func (e *fakeEngine) RestartCommands(m *entity.Model) (string, string)            { return "kill", "start" }
-func (e *fakeEngine) LivenessCommand() string                                     { return "liveness" }
-func (e *fakeEngine) DownloadedBytesCommand() string                              { return "downloaded" }
-func (e *fakeEngine) LogPath() string                                             { return "/tmp/llama.log" }
+func (e *fakeEngine) LivenessCommand(m *entity.Model) string                      { return "liveness" }
+func (e *fakeEngine) DownloadedBytesCommand(m *entity.Model) string               { return "downloaded" }
+func (e *fakeEngine) LogPath(m *entity.Model) string                              { return "/tmp/llama.log" }
+func (e *fakeEngine) ServerPort(m *entity.Model) int {
+	if e.port > 0 {
+		return e.port
+	}
+	return 8000
+}
+func (e *fakeEngine) HealthPath(m *entity.Model) string         { return "/v1/models" }
+func (e *fakeEngine) EnvVars(m *entity.Model) map[string]string { return e.env }
 
 // --------------------------------------------------------------------- probe
 
