@@ -86,7 +86,14 @@ MODELS=(
 "no|clip|FLUX.1|clip_l.safetensors|0.25GB|https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors|CLIP-L text encoder|The second of FLUX's two text encoders."
 
 # --- Additional SDXL checkpoints -------------------------------------------
-"no|checkpoint|SDXL|cyberrealisticXL_v100.safetensors|6.46GB|https://civitai.com/api/download/models/2840768|CyberRealistic XL v10.0|Strong photoreal SDXL model with excellent skin texture. CFG 3-5, 30+ steps, DPM++ 2M SDE Karras."
+# Preloaded, not registered-only, and the reason is the same one that keeps FLUX
+# out of the list: this is the single catalogue entry that 401s without a token.
+# The Manager's downloader sends no Authorization header, so a register-only
+# entry here would sit in the UI and fail every time it was clicked. fetch()
+# does send CIVITAI_TOKEN, so downloading it at boot works — at the cost of
+# 6.5 GB and about two minutes. Drop this row if you would rather have the
+# shorter boot.
+"yes|checkpoint|SDXL|cyberrealisticXL_v100.safetensors|6.46GB|https://civitai.com/api/download/models/2840768|CyberRealistic XL v10.0|Strong photoreal SDXL model with excellent skin texture. CFG 3-5, 30+ steps, DPM++ 2M SDE Karras. Needs CIVITAI_TOKEN, so it is preloaded rather than installed from the Manager."
 "no|checkpoint|SDXL|talmendoxlSDXL_v11Beta.safetensors|6.46GB|https://civitai.com/api/download/models/131960|TalmendoXL v1.1-Beta|SDXL fine-tune with natural lighting and good body variety. Uncensored."
 
 # --- Video models ----------------------------------------------------------
