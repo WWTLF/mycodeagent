@@ -63,7 +63,13 @@ fetch() {
     esac
 
     log "downloading ${name}"
-    if curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 \
+    # --no-progress-meter, not because the progress is unwanted but because
+    # nothing here is a terminal: the engine tees this into /tmp/cui.log, which
+    # is what `mycodeagent log` shows, and curl's meter redraws with carriage
+    # returns that a file keeps every one of. One 6 GB checkpoint buried the
+    # [provisioning] lines under a couple of hundred kilobytes of counter.
+    # Progress is reported per file instead, by the log lines around this.
+    if curl -fL --no-progress-meter --retry 3 --retry-delay 5 --connect-timeout 20 \
             "${auth[@]}" -o "${dest}.part" "${url}"; then
         mv "${dest}.part" "${dest}"
         log "done: ${name} ($(du -h "${dest}" | cut -f1))"

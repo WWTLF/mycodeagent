@@ -24,6 +24,10 @@ Instance 80 destroyed.
 That session cost about **20 cents**. It's an OpenAI-compatible endpoint, so anything
 that speaks that protocol works — opencode, Open WebUI, curl, your own script.
 
+Coding models are what it's for, but the same rent-use-destroy lifecycle runs two
+other things: **ComfyUI** for image generation and **JupyterLab** for notebooks. See
+[Images and notebooks](#images-and-notebooks).
+
 ## Install
 
 ```bash
@@ -59,17 +63,20 @@ Then check what's on offer:
 
 ```bash
 $ mycodeagent models
-ALIAS       NAME             GPUs      CTX   R  V  T  $/HR    GGUF REPO                     QUANT
-coder-mini  qwen35-9b        1x 16GB   64K   +  -  +  $0.069  unsloth/Qwen3.5-9B-GGUF       UD-Q5_K_XL
-coder       qwen36-27b-24g   1x 24GB   32K   +  -  +  $0.116  unsloth/Qwen3.6-27B-GGUF      IQ4_XS
-coder-fast  qwen36-35b-a3b   1x 24GB   64K   +  -  +  $0.116  unsloth/Qwen3.6-35B-A3B-GGUF  UD-IQ4_XS
-coder-hq    qwen36-27b-32g   1x 32GB   64K   +  -  +  $0.202  unsloth/Qwen3.6-27B-GGUF      Q5_K_M
-coder-max   qwen36-27b-48g   1x 48GB  128K   +  -  +  $0.376  unsloth/Qwen3.6-27B-GGUF      UD-Q6_K_XL
-rude        qwen36-35b-a3b-… 1x 32GB  128K   +  -  +  $0.202  mradermacher/Huihui-…         Q4_K_M
+ALIAS       NAME                        GPUs     CTX   R  V  T  $/HR    GGUF REPO                     QUANT
+comfyui     comfyui                     1x 48GB  -     -  -  -  $0.389                                -
+jupyter     jupyter-pytorch             1x 32GB  -     -  -  -  $0.295                                -
+coder-mini  qwen35-9b                   1x 16GB  64K   +  -  +  $0.063  unsloth/Qwen3.5-9B-GGUF       UD-Q5_K_XL
+coder       qwen36-27b-24g              1x 24GB  32K   +  -  +  $0.116  unsloth/Qwen3.6-27B-GGUF      IQ4_XS
+coder-fast  qwen36-35b-a3b              1x 24GB  64K   +  -  +  $0.150  unsloth/Qwen3.6-35B-A3B-GGUF  UD-IQ4_XS
+coder-hq    qwen36-27b-32g              1x 32GB  64K   +  -  +  $0.290  unsloth/Qwen3.6-27B-GGUF      Q5_K_M
+coder-max   qwen36-27b-48g              1x 48GB  128K  +  -  +  $0.389  unsloth/Qwen3.6-27B-GGUF      UD-Q6_K_XL
+rude        qwen36-35b-a3b-abliterated  1x 32GB  128K  +  -  +  $0.295  mradermacher/Huihui-…         Q4_K_M
 ```
 
 `R`/`V`/`T` are reasoning, vision, tool-calling. Prices are live — the cheapest
-matching offer at that moment.
+matching offer at that moment, so they move around; the numbers above were real when
+this was written. The top two aren't language models, so most columns don't apply.
 
 ## Which model
 
@@ -81,6 +88,8 @@ matching offer at that moment.
 | `coder-hq` | Same 27B, better quant, double the window. |
 | `coder-max` | Best quality this tool offers. 27B at ~6.5 bits, 128k window. |
 | `rude` | Uncensored. Fast MoE, 128k window. |
+| `comfyui` | Not a language model — image generation. |
+| `jupyter` | Not a language model — a GPU notebook. |
 
 The short version: **`coder` unless you have a reason.** `coder-max` if quality
 matters more than $0.28/hr. `coder-fast` only if you're impatient — it's a mixture-of-
@@ -148,6 +157,96 @@ to pick the new model in opencode yourself**; it won't switch for you.
 
 Run `mycodeagent config` again after `kill` to drop the dead provider.
 
+`config` only writes providers for the language models. `comfyui` and `jupyter`
+aren't OpenAI endpoints, so they're skipped rather than written as providers
+opencode couldn't use.
+
+## Images and notebooks
+
+Two catalog entries aren't language models. Same commands, same lifecycle, same
+billing — what changes is that you open a web UI instead of pointing a client at an
+API.
+
+```bash
+mycodeagent init comfyui     # ~$0.39/hr, 48 GB card
+mycodeagent init jupyter     # ~$0.30/hr, 32 GB card
+```
+
+Both come up on `http://localhost:8000` — open it in a browser. There's no password
+on either: the SSH tunnel is the access control, the port is never exposed publicly,
+and a login prompt on a single-user tunnel is just a way to lock yourself out.
+
+### Getting your work back
+
+This is the part that matters, because **`kill` destroys the disk**. A rsync loop
+runs while the instance lives and mirrors into a `COMFY_SYNC/` directory in your
+current working directory, every 60 seconds:
+
+```
+$ mycodeagent init comfyui
+...
+Syncing output + workflows to /home/you/project/COMFY_SYNC every 60s
+```
+
+| Directory | Direction | Why |
+|---|---|---|
+| `COMFY_SYNC/output` | down only | Generated images. The instance is their only author. |
+| `COMFY_SYNC/workflows` | **both ways** | Workflows are source files. Edit them locally and they reach the instance; save one in the UI and it lands here. |
+| `COMFY_SYNC/workspace` | down only | Jupyter's `/workspace` — notebooks and data. |
+
+Two-way means your workflows survive the instance and seed the next one: `init`
+uploads what's already in `COMFY_SYNC/workflows` before pulling anything down.
+
+Nothing is ever deleted, in either direction — a stale local copy must not be able
+to erase work on the instance, and vice versa. The cost is that deleting a file on
+one side only brings it back on the next pass; delete it on both to make it stick.
+When the same file changed on both sides, the newer one wins and the older is left
+alone rather than overwritten.
+
+Models are **not** synced back. They're tens of gigabytes and came from the internet
+in the first place — re-fetching costs less than uploading over a home connection.
+
+If the tunnel dies, `mycodeagent tunnel <vastai_id>` restarts the sync along with it.
+
+### Getting models onto a ComfyUI instance
+
+The instance is disposable, so anything you want on it has to arrive at boot. Two
+ways:
+
+**A provisioning script.** `--provisioning` takes a URL that the instance downloads
+and runs before ComfyUI starts, so checkpoints are in place when the UI opens:
+
+```bash
+mycodeagent init comfyui \
+  --provisioning https://raw.githubusercontent.com/WWTLF/mycodeagent/main/config/provisioning/photoreal.sh
+```
+
+That one is in this repo at [`config/provisioning/photoreal.sh`](config/provisioning/photoreal.sh)
+— a photorealistic-portrait setup: RealVisXL V5.0 plus its Lightning variant, the
+fp16-fix SDXL VAE, and the 4x-UltraSharp upscaler. About 14 GB. Copy it and edit the
+URLs to build your own.
+
+Your `HF_TOKEN` and `CIVITAI_TOKEN` (set once with `mycodeagent login`) are in the
+script's environment, so it can reach gated repos. **The script runs on a rented
+machine with those tokens available — point `--provisioning` only at a URL you
+control.**
+
+**ComfyUI-Manager**, which ships in the image. It downloads models and custom nodes
+from inside the web UI, so a missing checkpoint doesn't mean editing a script and
+redeploying. It reads `CIVITAI_TOKEN`, which is the route to civitai.com. Anything
+it fetches lives only until `kill`.
+
+### First generation
+
+The image ships Stable Diffusion 1.5, so a bare `init comfyui` can generate
+immediately. With `photoreal.sh` you get SDXL models instead, which need two changes
+from ComfyUI's default workflow: pick the checkpoint in **Load Checkpoint**, and set
+**Empty Latent Image** to 1024×1024 — the 512×512 default is SD1.5's native size and
+SDXL produces mush at it.
+
+`RealVisXL_V5.0_fp16` wants ~28 steps at CFG 4.5. The `_Lightning_` variant wants
+4-6 steps at CFG 1.5 — draft on it, finish on the full model.
+
 ## Cost
 
 The GPU bills by the second while it exists. Everything else is noise.
@@ -162,6 +261,9 @@ Total estimated spend: $0.21
 ```
 
 **`kill` when you stop working.** Not `stop`.
+
+For `comfyui` and `jupyter`, check `COMFY_SYNC/` has what you want first — `kill`
+takes the disk with it, and the sync runs on a 60-second cycle.
 
 `stop` releases the GPU but keeps the instance, and vast.ai keeps charging for its
 disk around the clock — about $0.006/hour for a 28 GB disk. What that buys you is
@@ -207,6 +309,12 @@ Interrupting a deploy yourself does *not* blacklist anything.
 mycodeagent tunnel 46320281
 ```
 
+**A ComfyUI deploy sits at "waiting for the server to become healthy".** Usually the
+provisioning script downloading checkpoints — `photoreal.sh` pulls about 14 GB.
+There's no progress bar for it: the byte counter `init` shows for language models
+works off a known download size, and a provisioning script's size isn't known.
+`mycodeagent log <id>` shows its `[provisioning]` lines, which is where to look.
+
 **Look at the logs.** `mycodeagent log <id>` fetches the instance's bootstrap output.
 Note that llama.cpp prints nothing while downloading the model, so silence there is
 normal — `init` reports progress separately.
@@ -217,7 +325,7 @@ normal — `init` reports progress separately.
 |---|---|
 | `login` | Store the vast.ai key + HF token, upload your SSH key |
 | `models` | Catalog with live pricing |
-| `init <model>` | Rent, start, tunnel. `--country`, `--create-instance-only` |
+| `init <model>` | Rent, start, tunnel. `--country`, `--provisioning`, `--create-instance-only` |
 | `ps` | List instances with health |
 | `config` | Write running instances into opencode's config |
 | `kill <id>` | Destroy. The normal way to finish. |
@@ -233,20 +341,26 @@ normal — `init` reports progress separately.
 
 ## State on your machine
 
-- `~/.mycodeagent/config.yaml` — API key, HF token, base port
+- `~/.mycodeagent/config.yaml` — API key, HF token, CivitAI token, base port
 - `~/.mycodeagent/mycodeagent.db` — instances and the bad-host list
+- `./COMFY_SYNC/` — created in the working directory while a ComfyUI or Jupyter
+  instance is running; see [Getting your work back](#getting-your-work-back)
 - `VASTAI_API_KEY` / `HF_TOKEN` override the config file
 
-Nothing is stored on the rented machine that you'd miss: it's destroyed on `kill`,
-and the model re-downloads next time.
+For a language model, nothing on the rented machine is worth keeping: it's destroyed
+on `kill` and the weights re-download next time. For the other two engines that is
+not true, which is what `COMFY_SYNC` exists for.
 
 ## How it works, briefly
 
-`init` searches vast.ai for the cheapest verified offer meeting the model's VRAM,
-disk and bandwidth requirements, creates an instance running
-`ghcr.io/ggml-org/llama.cpp:server-cuda-*`, waits for SSH, opens a local port
-forward to the server's port 8000, and waits for it to answer. Every step shares one
+`init` searches vast.ai for the cheapest verified offer meeting the entry's VRAM,
+disk and bandwidth requirements, creates an instance, waits for SSH, opens a local
+port forward to the server, and waits for it to answer. Every step shares one
 deadline; if any of them misses it, the instance is destroyed.
+
+Which image and which port depends on the entry: `ghcr.io/ggml-org/llama.cpp` on
+8000 for the language models, `vastai/comfy` on 8188, `vastai/pytorch` on 8888. The
+lifecycle is identical — that's the point of the engine abstraction.
 
 Design notes, the model sizing arithmetic and the llama.cpp flag reference are in
 [`docs/Solution.md`](docs/Solution.md). Contributor guide: [`AGENTS.md`](AGENTS.md).
