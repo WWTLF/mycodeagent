@@ -8,7 +8,10 @@ import (
 )
 
 const (
-	jupyterImage      = "vastai/pytorch:cuda12"
+	// Verified against the registry: "cuda12" is not a tag vastai/pytorch publishes
+	// (1145 tags, none by that name), so this 404'd on every deploy. Pinned to a
+	// dated build for reproducibility.
+	jupyterImage      = "vastai/pytorch:2.12.0-cuda-12.6.3-24.04-2026-06-15"
 	jupyterServerPort = 8888
 
 	// Neither path contains the literal "jupyter". That is not cosmetic: the

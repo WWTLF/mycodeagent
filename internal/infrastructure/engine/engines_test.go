@@ -200,3 +200,29 @@ func TestComfyUIDisablesItsOwnWebAuth(t *testing.T) {
 		t.Errorf("WEB_ENABLE_AUTH = %q (present: %v), want \"false\"", v, ok)
 	}
 }
+
+// Image references must be pinned and must have been checked against the
+// registry. Both engines shipped with a tag that did not exist —
+// ai-dock/comfyui has no 24.04 or 12.8 tag at all, and vastai/pytorch publishes
+// no "cuda12" — so every deploy created a billing instance and then failed to
+// pull. The build cannot verify a tag exists offline, but it can refuse the
+// floating tags that make the failure intermittent instead of immediate.
+func TestDockerImagesArePinned(t *testing.T) {
+	for name, e := range allEngines() {
+		img := e.DockerImage(nil)
+		t.Run(name, func(t *testing.T) {
+			repo, tag, ok := strings.Cut(img, ":")
+			if !ok || tag == "" {
+				t.Fatalf("image has no tag (would resolve to :latest): %q", img)
+			}
+			if repo == "" || !strings.Contains(repo, "/") {
+				t.Errorf("image reference looks malformed: %q", img)
+			}
+			for _, floating := range []string{"latest", "main", "master", "edge", "nightly"} {
+				if tag == floating {
+					t.Errorf("tag %q floats — a silent upstream push would change what deploys: %q", tag, img)
+				}
+			}
+		})
+	}
+}

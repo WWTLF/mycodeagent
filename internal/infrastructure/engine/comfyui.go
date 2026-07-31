@@ -8,7 +8,13 @@ import (
 )
 
 const (
-	comfyUIImage      = "ghcr.io/ai-dock/comfyui:cuda-12.8.1-runtime-ubuntu24.04"
+	// Verified against the registry: ai-dock/comfyui has no 24.04 and no 12.8 tag at
+	// all — the previous value was invented by analogy with the llama.cpp image and
+	// 404s, so every `init comfyui` created a billing instance that then failed to
+	// pull. Pinned rather than :latest-cuda so a silent upstream change cannot
+	// break a deploy. CUDA 12.1.1 runs fine on the cuda_max_good >= 12.8 hosts the
+	// offer search selects; a newer driver runs an older runtime.
+	comfyUIImage      = "ghcr.io/ai-dock/comfyui:v2-cuda-12.1.1-base-22.04-v0.2.7"
 	comfyUIServerPort = 8188
 	comfyUIScriptPath = "/tmp/start_cui.sh"
 	comfyUILogPath    = "/tmp/cui.log"
