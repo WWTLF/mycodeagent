@@ -16,8 +16,7 @@ import (
 // workable for image generation: fetch the models on every boot instead of
 // carrying them.
 const provisioningHelp = `--provisioning takes the URL of a shell script the instance downloads and runs
-before its service starts. The ai-dock images (ComfyUI) support this; llama.cpp
-ignores it.
+before its service starts. ComfyUI supports this; llama.cpp ignores it.
 
 It is how checkpoints and LoRAs get onto a machine that is destroyed after use:
 put the downloads in the script rather than copying weights back and forth. Set
@@ -136,7 +135,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 
 	cmd.Flags().BoolVar(&createOnly, "create-instance-only", false, "Create instance and show SSH details without setting up tunnel or waiting for the model server")
 	cmd.Flags().StringVar(&country, "country", "", "Comma-separated ISO-3166 alpha-2 country codes to rent in (see --help for the list)")
-	cmd.Flags().StringVar(&provisioning, "provisioning", "", "URL of a script the instance runs before starting, to fetch models (ai-dock images only)")
+	cmd.Flags().StringVar(&provisioning, "provisioning", "", "URL of a script the instance runs before starting, to fetch models (ComfyUI only)")
 
 	return cmd
 }
