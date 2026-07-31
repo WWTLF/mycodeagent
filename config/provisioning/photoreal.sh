@@ -251,19 +251,28 @@ with open(path) as fh:
     data = json.load(fh)
 models = data.setdefault('models', [])
 
-# The install-time whitelist matches on exactly this triple, so it is also the
-# right identity for "already registered" — re-running must not duplicate.
-seen = {(m.get('save_path'), m.get('base'), m.get('filename')) for m in models}
+# Dedupe on the filename alone, not on the (save_path, base, filename) triple
+# the install-time whitelist matches. The triple is the right identity for "may
+# this be installed"; it is the wrong one for "is this already in the list",
+# because the shipped catalogue reaches the same file by a different route —
+# t5xxl_fp8_e4m3fn.safetensors is filed under save_path 'text_encoders/t5' there
+# and 'default' here. Keying on the triple therefore added a second, visibly
+# identical row for every model the image already knew: sd_xl_base_1.0, clip_l
+# and t5xxl all appeared twice in the Model Manager.
+#
+# The shipped entry wins, being the curated one; ours is skipped. Both point at
+# the same file either way.
+seen = {m.get('filename') for m in models}
 
-added = 0
+added = skipped = 0
 with open(os.environ['MODELS_TSV']) as fh:
     for line in fh:
         line = line.rstrip('\n')
         if not line:
             continue
         type_, base, filename, size, url, name, desc = line.split('\t')
-        key = ('default', base, filename)
-        if key in seen:
+        if filename in seen:
+            skipped += 1
             continue
         models.append({
             'name': name,
@@ -276,15 +285,15 @@ with open(os.environ['MODELS_TSV']) as fh:
             'url': url,
             'size': size,
         })
-        seen.add(key)
+        seen.add(filename)
         added += 1
 
 tmp = path + '.tmp'
 with open(tmp, 'w') as fh:
     json.dump(data, fh, indent=2)
 os.replace(tmp, path)
-print(f'[provisioning] registered {added} model(s) with ComfyUI-Manager '
-      f'({len(models)} entries total)')
+print(f'[provisioning] registered {added} model(s) with ComfyUI-Manager, '
+      f'{skipped} already listed ({len(models)} entries total)')
 PY
 
     # Point the Manager's database at the local file so the additions are
