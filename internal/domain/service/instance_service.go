@@ -87,17 +87,24 @@ func (s *InstanceService) remotePort(modelName string) int {
 	return s.engine.ServerPort(model)
 }
 
-// servesOpenAIAPI reports whether an instance speaks the OpenAI protocol, and
-// therefore whether /v1 means anything on it.
+// servesOpenAIAPI reports whether a model's engine speaks the OpenAI protocol,
+// and therefore whether /v1 means anything on it.
 //
-// An unknown model is treated as llama.cpp, matching every other fallback here:
-// rows written before the engine split have no EngineType at all.
-func (s *InstanceService) servesOpenAIAPI(modelName string) bool {
+// A nil model counts as llama.cpp, as does an unset EngineType: rows written
+// before the engine split have no type at all, and an instance whose catalog
+// entry has since been renamed must stay reachable.
+func servesOpenAIAPI(model *entity.Model) bool {
+	return model == nil || model.EngineType == "" || model.EngineType == entity.EngineLlamaCpp
+}
+
+// servesOpenAIAPIByName is the same question asked about a stored instance,
+// whose model is a name rather than an entry.
+func (s *InstanceService) servesOpenAIAPIByName(modelName string) bool {
 	model, err := s.models.FindByName(modelName)
 	if err != nil {
 		return true
 	}
-	return model.EngineType == "" || model.EngineType == entity.EngineLlamaCpp
+	return servesOpenAIAPI(model)
 }
 
 // TunnelURL is the address to open for an instance.
@@ -112,7 +119,7 @@ func (s *InstanceService) TunnelURL(inst *entity.Instance) string {
 		return ""
 	}
 	base := fmt.Sprintf("http://localhost:%d", inst.LocalPort)
-	if s.servesOpenAIAPI(inst.ModelName) {
+	if s.servesOpenAIAPIByName(inst.ModelName) {
 		return base + "/v1"
 	}
 	return base
@@ -135,7 +142,7 @@ func (s *InstanceService) HealthProbe(inst *entity.Instance) (url string, expect
 		model = nil // every engine answers a nil model with its own default
 	}
 	path := s.engine.HealthPath(model)
-	return fmt.Sprintf("http://localhost:%d%s", inst.LocalPort, path), s.servesOpenAIAPI(inst.ModelName)
+	return fmt.Sprintf("http://localhost:%d%s", inst.LocalPort, path), s.servesOpenAIAPIByName(inst.ModelName)
 }
 
 // ============================================================================

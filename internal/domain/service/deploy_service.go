@@ -523,7 +523,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, opts Deplo
 	// might still be torn down, and would have to be stopped again on failure.
 	s.startSync(inst, model)
 
-	fmt.Printf("\nAPI available at: http://localhost:%d/v1\n", localPort)
+	announceEndpoint(model, localPort)
 	return inst, nil
 }
 
@@ -912,7 +912,7 @@ func (s *DeployService) Start(ctx context.Context, id int64) error {
 		return warn(fmt.Errorf("start timed out after %s", timeout))
 	}
 
-	fmt.Printf("\nAPI available at: http://localhost:%d/v1\n", localPort)
+	announceEndpoint(model, localPort)
 	return nil
 }
 
@@ -1014,4 +1014,17 @@ func (s *DeployService) Restart(ctx context.Context, id int64) error {
 
 	fmt.Println("Restart initiated. Use 'mycodeagent log -f' to monitor.")
 	return nil
+}
+
+// announceEndpoint prints where the instance can be reached.
+//
+// It used to be a hardcoded "API available at http://localhost:PORT/v1" for
+// every engine, which for ComfyUI and Jupyter named a path that does not exist
+// on them — the last line of a successful deploy sent the operator to a 404.
+func announceEndpoint(model *entity.Model, localPort int) {
+	if servesOpenAIAPI(model) {
+		fmt.Printf("\nAPI available at: http://localhost:%d/v1\n", localPort)
+		return
+	}
+	fmt.Printf("\nOpen in a browser: http://localhost:%d\n", localPort)
 }

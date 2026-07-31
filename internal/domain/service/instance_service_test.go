@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -268,5 +269,51 @@ func TestEndpointsAreEmptyWithoutATunnel(t *testing.T) {
 	}
 	if url, _ := svc.HealthProbe(inst); url != "" {
 		t.Errorf("HealthProbe url = %q for an instance with no tunnel, want empty", url)
+	}
+}
+
+// The last line of a successful deploy. It was hardcoded to
+// "API available at http://localhost:PORT/v1" for every engine, so a ComfyUI
+// deploy ended by naming a path that does not exist on it — the operator's first
+// click after a 10-minute wait went to a 404.
+func TestDeployAnnouncesTheRightEndpointPerEngine(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		model      *entity.Model
+		wantSubstr string
+		notSubstr  string
+	}{
+		{
+			name:       "llama.cpp announces the API",
+			model:      &entity.Model{Name: "coder", EngineType: entity.EngineLlamaCpp},
+			wantSubstr: "API available at: http://localhost:8000/v1",
+		},
+		{
+			name:       "a catalog row with no engine type is llama.cpp",
+			model:      &entity.Model{Name: "coder"},
+			wantSubstr: "API available at: http://localhost:8000/v1",
+		},
+		{
+			name:       "ComfyUI announces a browser URL",
+			model:      &entity.Model{Name: "comfyui", EngineType: entity.EngineComfyUI},
+			wantSubstr: "http://localhost:8000",
+			notSubstr:  "/v1",
+		},
+		{
+			name:       "Jupyter announces a browser URL",
+			model:      &entity.Model{Name: "jupyter-pytorch", EngineType: entity.EngineJupyter},
+			wantSubstr: "http://localhost:8000",
+			notSubstr:  "/v1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureStdout(t, func() { announceEndpoint(tc.model, 8000) })
+			if !strings.Contains(out, tc.wantSubstr) {
+				t.Errorf("output %q does not contain %q", out, tc.wantSubstr)
+			}
+			if tc.notSubstr != "" && strings.Contains(out, tc.notSubstr) {
+				t.Errorf("output %q names %q, which this engine does not serve", out, tc.notSubstr)
+			}
+		})
 	}
 }

@@ -172,9 +172,11 @@ mycodeagent init comfyui     # ~$0.39/hr, 48 GB card
 mycodeagent init jupyter     # ~$0.30/hr, 32 GB card
 ```
 
-Both come up on `http://localhost:8000` — open it in a browser. There's no password
-on either: the SSH tunnel is the access control, the port is never exposed publicly,
-and a login prompt on a single-user tunnel is just a way to lock yourself out.
+Both open in a browser at the URL `mycodeagent ps` prints — `http://localhost:8000`
+unless that port was taken, in which case `init` picks the next free one. There's no
+password on either: the SSH tunnel is the access control, the port is never exposed
+publicly, and a login prompt on a single-user tunnel is just a way to lock yourself
+out.
 
 ### Getting your work back
 
@@ -233,8 +235,9 @@ control.**
 
 **ComfyUI-Manager**, which ships in the image. It downloads models and custom nodes
 from inside the web UI, so a missing checkpoint doesn't mean editing a script and
-redeploying. It reads `CIVITAI_TOKEN`, which is the route to civitai.com. Anything
-it fetches lives only until `kill`.
+redeploying — including from civitai.com, where most community portrait fine-tunes
+and LoRAs live. Anything it fetches lives only until `kill`, and it isn't synced
+back.
 
 ### First generation
 
