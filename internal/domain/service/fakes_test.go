@@ -373,6 +373,7 @@ type fakeEngine struct {
 	lastNumGPUs, lastContext int
 	syncDirs                 []entity.SyncDir
 	port                     int
+	healthPath               string
 	env                      map[string]string
 }
 
@@ -395,7 +396,12 @@ func (e *fakeEngine) ServerPort(m *entity.Model) int {
 	}
 	return 8000
 }
-func (e *fakeEngine) HealthPath(m *entity.Model) string         { return "/v1/models" }
+func (e *fakeEngine) HealthPath(m *entity.Model) string {
+	if e.healthPath != "" {
+		return e.healthPath
+	}
+	return "/v1/models"
+}
 func (e *fakeEngine) EnvVars(m *entity.Model) map[string]string { return e.env }
 
 // --------------------------------------------------------------------- probe

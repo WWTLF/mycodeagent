@@ -161,6 +161,18 @@ func (app *App) GetServedModelInfo(ctx context.Context, localPort int) (string, 
 	return app.InstanceSvc.GetServedModelInfo(ctx, localPort)
 }
 
+// TunnelURL is the address to open for an instance: /v1 for the OpenAI-speaking
+// engines, the bare root for the ones that serve a web UI.
+func (app *App) TunnelURL(inst *entity.Instance) string {
+	return app.InstanceSvc.TunnelURL(inst)
+}
+
+// HealthProbe returns the URL to GET to check an instance, and whether a 200
+// must carry an OpenAI model list to count as healthy.
+func (app *App) HealthProbe(inst *entity.Instance) (url string, expectModelList bool) {
+	return app.InstanceSvc.HealthProbe(inst)
+}
+
 // GetLogs returns the vast.ai-side onstart bootstrap log for an instance.
 // This is the canonical "what does `mycodeagent log` show" path. The internal
 // fetch+retry against the vast.ai S3 URL lives in InstanceSvc.GetVastaiLogs.

@@ -40,8 +40,12 @@ func NewPsCmd(app *application.App) *cobra.Command {
 				tunnelURL := "-"
 				health := "-"
 				if inst.LocalPort > 0 {
-					tunnelURL = fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
-					health = checkHealth(inst.LocalPort)
+					// Both come from the engine behind the instance's model. A
+					// hardcoded /v1 here printed a 404 for ComfyUI and Jupyter and
+					// reported every healthy one of them as unhealthy.
+					tunnelURL = app.TunnelURL(inst)
+					probeURL, expectModels := app.HealthProbe(inst)
+					health = checkHealth(probeURL, expectModels)
 				}
 
 				// Try to detect model via the served API if unknown and tunnel is up.
@@ -66,20 +70,32 @@ func NewPsCmd(app *application.App) *cobra.Command {
 	}
 }
 
-func checkHealth(localPort int) string {
-	// Use /v1/models as a universal OpenAI-compatible probe rather than an
-	// engine-specific /health route, and require a valid "data" array containing
-	// the loaded model(s) — some servers 200 unknown paths with an error body, so
-	// status alone gives false positives. Valid shape ⇒ actually serving.
-	// llama-server answers 503 here until the weights finish loading.
+// checkHealth GETs the engine's health route through the tunnel.
+//
+// expectModelList additionally requires an OpenAI "data" array holding the
+// loaded model, which is how "serving" is told apart from "bound the port":
+// llama-server answers 503 on every route but /health until the weights are in,
+// and some servers 200 an unknown path with an error body, so status alone gives
+// false positives.
+//
+// It applies to the OpenAI engines only. ComfyUI's /history answers `{}` and
+// Jupyter's / answers HTML; demanding a model list of them marked every healthy
+// instance unhealthy.
+func checkHealth(url string, expectModelList bool) string {
+	if url == "" {
+		return "-"
+	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/v1/models", localPort))
+	resp, err := client.Get(url)
 	if err != nil {
 		return "unreachable"
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		return fmt.Sprintf("unhealthy (%d)", resp.StatusCode)
+	}
+	if !expectModelList {
+		return "healthy"
 	}
 	var body struct {
 		Data []struct {

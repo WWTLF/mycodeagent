@@ -87,6 +87,57 @@ func (s *InstanceService) remotePort(modelName string) int {
 	return s.engine.ServerPort(model)
 }
 
+// servesOpenAIAPI reports whether an instance speaks the OpenAI protocol, and
+// therefore whether /v1 means anything on it.
+//
+// An unknown model is treated as llama.cpp, matching every other fallback here:
+// rows written before the engine split have no EngineType at all.
+func (s *InstanceService) servesOpenAIAPI(modelName string) bool {
+	model, err := s.models.FindByName(modelName)
+	if err != nil {
+		return true
+	}
+	return model.EngineType == "" || model.EngineType == entity.EngineLlamaCpp
+}
+
+// TunnelURL is the address to open for an instance.
+//
+// llama.cpp serves an OpenAI-compatible API rooted at /v1, which is what a
+// client needs. ComfyUI and Jupyter serve a web UI at the root and have no /v1
+// at all, so printing one sent the operator to a 404 on a perfectly healthy
+// instance. Same defect as the tunnel forwarding to llama.cpp's port regardless
+// of engine: a value the EngineProvider already knew, hardcoded by the caller.
+func (s *InstanceService) TunnelURL(inst *entity.Instance) string {
+	if inst == nil || inst.LocalPort <= 0 {
+		return ""
+	}
+	base := fmt.Sprintf("http://localhost:%d", inst.LocalPort)
+	if s.servesOpenAIAPI(inst.ModelName) {
+		return base + "/v1"
+	}
+	return base
+}
+
+// HealthProbe says how to check an instance through its tunnel: the URL to GET,
+// and whether a 200 has to carry an OpenAI model list to count.
+//
+// The model list check is what distinguishes "loaded and serving" from "bound
+// the port": llama-server answers 503 on every route but /health until the
+// weights are in. It cannot be applied to the other engines, whose health routes
+// answer with something else entirely — requiring it reported every healthy
+// ComfyUI as unhealthy.
+func (s *InstanceService) HealthProbe(inst *entity.Instance) (url string, expectModelList bool) {
+	if inst == nil || inst.LocalPort <= 0 {
+		return "", false
+	}
+	model, err := s.models.FindByName(inst.ModelName)
+	if err != nil {
+		model = nil // every engine answers a nil model with its own default
+	}
+	path := s.engine.HealthPath(model)
+	return fmt.Sprintf("http://localhost:%d%s", inst.LocalPort, path), s.servesOpenAIAPI(inst.ModelName)
+}
+
 // ============================================================================
 // Repository CRUD pass-throughs (so App stops touching the repo directly)
 // ============================================================================

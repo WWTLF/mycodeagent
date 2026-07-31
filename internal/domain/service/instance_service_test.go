@@ -165,3 +165,108 @@ func TestInstanceStatusIs(t *testing.T) {
 		}
 	}
 }
+
+// newEndpointSvc builds a service whose catalog holds exactly the given models.
+func newEndpointSvc(eng EngineProvider, models ...*entity.Model) *InstanceService {
+	return NewInstanceService(
+		&fakeInstanceRepo{}, &fakeVastai{}, &fakeSSH{}, &fakeProbe{},
+		NewModelService(&fakeModelRepo{models: models}),
+		eng,
+		8000,
+	)
+}
+
+// The URL and the health route both belong to the engine, and both were
+// hardcoded to llama.cpp's by every caller. `ps` printed
+// http://localhost:8000/v1 for a ComfyUI instance — a 404 — and probed
+// /v1/models, which ComfyUI does not have, so a perfectly healthy image
+// generator was reported unhealthy for the life of the rental. Same shape of
+// defect as the tunnel that forwarded to port 8000 whatever the engine.
+func TestEndpointsFollowTheEngineNotLlamaCpp(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		model            *entity.Model
+		enginePath       string
+		wantURL          string
+		wantProbe        string
+		wantExpectModels bool
+	}{
+		{
+			name:             "llama.cpp serves the OpenAI API under /v1",
+			model:            &entity.Model{Name: "coder", EngineType: entity.EngineLlamaCpp},
+			enginePath:       "/v1/models",
+			wantURL:          "http://localhost:8000/v1",
+			wantProbe:        "http://localhost:8000/v1/models",
+			wantExpectModels: true,
+		},
+		{
+			// Rows written before the engine split carry no EngineType at all.
+			name:             "an unset engine type is llama.cpp",
+			model:            &entity.Model{Name: "coder"},
+			enginePath:       "/v1/models",
+			wantURL:          "http://localhost:8000/v1",
+			wantProbe:        "http://localhost:8000/v1/models",
+			wantExpectModels: true,
+		},
+		{
+			name:             "ComfyUI serves a UI at the root",
+			model:            &entity.Model{Name: "comfyui", EngineType: entity.EngineComfyUI},
+			enginePath:       "/history",
+			wantURL:          "http://localhost:8000",
+			wantProbe:        "http://localhost:8000/history",
+			wantExpectModels: false,
+		},
+		{
+			name:             "Jupyter serves a UI at the root",
+			model:            &entity.Model{Name: "jupyter-pytorch", EngineType: entity.EngineJupyter},
+			enginePath:       "/",
+			wantURL:          "http://localhost:8000",
+			wantProbe:        "http://localhost:8000/",
+			wantExpectModels: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newEndpointSvc(&fakeEngine{healthPath: tc.enginePath}, tc.model)
+			inst := &entity.Instance{ModelName: tc.model.Name, LocalPort: 8000}
+
+			if got := svc.TunnelURL(inst); got != tc.wantURL {
+				t.Errorf("TunnelURL = %q, want %q", got, tc.wantURL)
+			}
+			gotProbe, gotExpect := svc.HealthProbe(inst)
+			if gotProbe != tc.wantProbe {
+				t.Errorf("HealthProbe url = %q, want %q", gotProbe, tc.wantProbe)
+			}
+			if gotExpect != tc.wantExpectModels {
+				t.Errorf("HealthProbe expectModelList = %v, want %v", gotExpect, tc.wantExpectModels)
+			}
+		})
+	}
+}
+
+// An instance whose catalog entry has been renamed or removed must still be
+// reachable — the same fallback remotePort makes, for the same reason.
+func TestEndpointsFallBackToLlamaCppForAnUnknownModel(t *testing.T) {
+	svc := newEndpointSvc(&fakeEngine{})
+	inst := &entity.Instance{ModelName: "deleted-from-the-catalog", LocalPort: 8000}
+
+	if got := svc.TunnelURL(inst); got != "http://localhost:8000/v1" {
+		t.Errorf("TunnelURL = %q, want the llama.cpp fallback", got)
+	}
+	if _, expectModels := svc.HealthProbe(inst); !expectModels {
+		t.Error("an unknown model should be probed as llama.cpp")
+	}
+}
+
+// No tunnel means nothing to show and nothing to probe, and `ps` renders that as
+// a dash rather than as a URL nobody can open.
+func TestEndpointsAreEmptyWithoutATunnel(t *testing.T) {
+	svc := newEndpointSvc(&fakeEngine{}, &entity.Model{Name: "coder"})
+	inst := &entity.Instance{ModelName: "coder", LocalPort: 0}
+
+	if got := svc.TunnelURL(inst); got != "" {
+		t.Errorf("TunnelURL = %q for an instance with no tunnel, want empty", got)
+	}
+	if url, _ := svc.HealthProbe(inst); url != "" {
+		t.Errorf("HealthProbe url = %q for an instance with no tunnel, want empty", url)
+	}
+}

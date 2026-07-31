@@ -27,10 +27,21 @@ func NewTunnelCmd(app *application.App) *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("Tunnel established: http://localhost:%d/v1 (PID %d)\n", inst.LocalPort, inst.TunnelPID)
+			fmt.Printf("Tunnel established: %s (PID %d)\n", app.TunnelURL(inst), inst.TunnelPID)
 
 			// Brief pause for tunnel to stabilize before health probe.
 			time.Sleep(3 * time.Second)
+
+			// GetServedModelInfo reads /v1/models, which only the OpenAI engines
+			// have. Asking ComfyUI or Jupyter for it reported "not responding" on
+			// an instance that was serving perfectly well.
+			probeURL, expectModelList := app.HealthProbe(inst)
+			if !expectModelList {
+				fmt.Print("Verifying server... ")
+				fmt.Println(checkHealth(probeURL, false))
+				return nil
+			}
+
 			fmt.Print("Verifying model server... ")
 			id, maxLen, err := app.GetServedModelInfo(ctx, inst.LocalPort)
 			if err != nil || id == "" {

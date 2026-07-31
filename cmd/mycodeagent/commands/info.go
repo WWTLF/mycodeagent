@@ -37,12 +37,13 @@ func NewInfoCmd(app *application.App) *cobra.Command {
 				if inst == nil {
 					return fmt.Errorf("instance %d not found", id)
 				}
-				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
+				baseURL := app.TunnelURL(inst)
+				_, openAI := app.HealthProbe(inst)
 				hfRepo := inst.ModelName
 				if m, err := app.FindModelByName(inst.ModelName); err == nil {
 					hfRepo = m.HFRepo
 				}
-				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL, hfRepo)
+				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL, hfRepo, openAI)
 				return nil
 			}
 
@@ -69,12 +70,13 @@ func NewInfoCmd(app *application.App) *cobra.Command {
 
 			if len(running) == 1 {
 				inst := running[0]
-				baseURL := fmt.Sprintf("http://localhost:%d/v1", inst.LocalPort)
+				baseURL := app.TunnelURL(inst)
+				_, openAI := app.HealthProbe(inst)
 				hfRepo := inst.ModelName
 				if m, err := app.FindModelByName(inst.ModelName); err == nil {
 					hfRepo = m.HFRepo
 				}
-				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL, hfRepo)
+				printInstanceInfo(inst.ID, inst.ModelName, string(inst.Status), baseURL, hfRepo, openAI)
 				return nil
 			}
 
@@ -84,16 +86,26 @@ func NewInfoCmd(app *application.App) *cobra.Command {
 			fmt.Fprintln(w, "  ID\tMODEL\tURL")
 			fmt.Fprintln(w, "  --\t-----\t---")
 			for _, inst := range running {
-				fmt.Fprintf(w, "  %d\t%s\thttp://localhost:%d/v1\n", inst.ID, inst.ModelName, inst.LocalPort)
+				fmt.Fprintf(w, "  %d\t%s\t%s\n", inst.ID, inst.ModelName, app.TunnelURL(inst))
 			}
 			return w.Flush()
 		},
 	}
 }
 
-func printInstanceInfo(id int64, modelName, status, baseURL, hfRepo string) {
+// printInstanceInfo shows how to reach an instance.
+//
+// openAI gates everything below the URL: an opencode provider block and
+// OPENAI_BASE_URL are meaningless for ComfyUI and Jupyter, which serve a web UI
+// and no API. Printing them anyway was instructions that could not work.
+func printInstanceInfo(id int64, modelName, status, baseURL, hfRepo string, openAI bool) {
 	fmt.Printf("=== Instance %d: %s (%s) ===\n", id, modelName, status)
 	fmt.Println()
+	if !openAI {
+		fmt.Println("Open in a browser:", baseURL)
+		fmt.Println()
+		return
+	}
 	fmt.Println("Endpoint:", baseURL)
 	fmt.Println()
 	fmt.Println("--- opencode.json ---")

@@ -90,6 +90,15 @@ func NewConfigCmd(app *application.App) *cobra.Command {
 					continue
 				}
 
+				// opencode talks the OpenAI protocol, so only the engines that
+				// serve it belong in its config. A ComfyUI or Jupyter instance
+				// used to get a provider block pointing at a web UI, plus a
+				// warning that it "did not answer /v1/models" — which it never
+				// claimed to.
+				if _, openAI := app.HealthProbe(inst); !openAI {
+					continue
+				}
+
 				// The model id opencode must send back. The engine launches the
 				// server with `--alias model.Name`, and entity.Instance.ModelName is
 				// that same value, so the stored name is already the right fallback.
