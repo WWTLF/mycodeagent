@@ -248,12 +248,16 @@ func TestDeployNeverBlamesHostForACrash(t *testing.T) {
 	repo := newFakeInstanceRepo()
 	badHosts := newFakeBadHostRepo()
 	vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
-	// Liveness reports DEAD, so the watcher fires before the health poll can.
-	ssh := &fakeSSH{
-		tunnelPID:  1,
-		healthWait: time.Minute,
-		remoteOut:  map[string]string{"liveness": "DEAD"},
-	}
+	// ALIVE first, then DEAD: the watcher only calls it a crash once the server
+	// has actually been seen running, so a probe that starts at DEAD would be a
+	// server that never started — a timeout, not a crash.
+	ssh := &fakeSSH{tunnelPID: 1, healthWait: time.Minute}
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		ssh.mu.Lock()
+		ssh.remoteOut = map[string]string{"liveness": "DEAD"}
+		ssh.mu.Unlock()
+	}()
 	model := testDeployModel()
 	model.StartupTimeout = 5 * time.Second // room for the watcher to reach 2 reads
 	svc := NewDeployService(
@@ -624,5 +628,69 @@ func TestEngineEnvOmitsUnsetCredentials(t *testing.T) {
 		if _, present := env[k]; present {
 			t.Errorf("%s present despite being unset: %q", k, env[k])
 		}
+	}
+}
+
+// "The process is no longer running" is a claim about something that *was*
+// running. The watcher used to make it about a process that had never started,
+// which killed a ComfyUI deploy: its onstart spends several minutes fetching
+// models before launching the server, so the probe correctly reported DEAD
+// while everything was fine. A server that never appears is a timeout, and the
+// deploy's own deadline already covers that.
+func TestWatcherDoesNotCallItACrashBeforeTheServerEverStarted(t *testing.T) {
+	defer withFastLivenessWatcher()()
+
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 1}
+	// DEAD forever — as during a long provisioning step — and health never
+	// arrives, so the deploy must end on its deadline, not on a crash verdict.
+	ssh := &fakeSSH{
+		tunnelPID:  1,
+		healthWait: time.Minute,
+		remoteOut:  map[string]string{"liveness": "DEAD"},
+	}
+	model := testDeployModel()
+	model.StartupTimeout = 900 * time.Millisecond
+	svc, _ := newTestDeploy(model, vast, ssh, repo)
+
+	_, err := svc.Deploy(context.Background(), model.Name, DeployOptions{})
+	if err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	if strings.Contains(err.Error(), "crashed") {
+		t.Errorf("reported a crash for a server that never started: %v", err)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected a timeout, got: %v", err)
+	}
+}
+
+// The guard must not disarm the watcher: a server that comes up and then dies
+// is exactly what it exists to catch, and catching it early is what stops a
+// doomed deploy from burning its whole budget.
+func TestWatcherStillCatchesACrashAfterTheServerWasAlive(t *testing.T) {
+	defer withFastLivenessWatcher()()
+
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 1}
+	ssh := &fakeSSH{tunnelPID: 1, healthWait: time.Minute}
+	// ALIVE first (fakeSSH's default), then DEAD once the test flips it.
+	model := testDeployModel()
+	model.StartupTimeout = 5 * time.Second
+	svc, _ := newTestDeploy(model, vast, ssh, repo)
+
+	go func() {
+		time.Sleep(120 * time.Millisecond) // let a few ALIVE reads land
+		ssh.mu.Lock()
+		ssh.remoteOut = map[string]string{"liveness": "DEAD"}
+		ssh.mu.Unlock()
+	}()
+
+	_, err := svc.Deploy(context.Background(), model.Name, DeployOptions{})
+	if err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	if !strings.Contains(err.Error(), "crashed") {
+		t.Errorf("a server that died after starting must be reported as a crash: %v", err)
 	}
 }

@@ -547,6 +547,14 @@ func (s *DeployService) watchServerProcess(ctx context.Context, model *entity.Mo
 	tailCmd := fmt.Sprintf("tail -n 25 %s 2>/dev/null", s.engine.LogPath(model))
 	progress := newDownloadReporter(model)
 
+	// everAlive gates the crash verdict. "The process is no longer running" is a
+	// claim about something that was running, and the watcher used to make it
+	// about a process that had never started — which killed a ComfyUI deploy
+	// whose onstart spends several minutes fetching models *before* launching
+	// the server. A server that never appears is a timeout, and the deploy's own
+	// deadline already covers that; this path exists for one that started and
+	// then died.
+	everAlive := false
 	deadCount := 0
 	for {
 		// Same tick, second call: the model server prints nothing at all while
@@ -562,13 +570,14 @@ func (s *DeployService) watchServerProcess(ctx context.Context, model *entity.Mo
 			deadCount = 0 // SSH hiccup, not a crash signal
 		case strings.Contains(string(out), "DEAD"):
 			deadCount++
-			if deadCount >= 2 {
+			if everAlive && deadCount >= 2 {
 				logTail, _ := s.ssh.RunRemoteCommand(sshHost, sshPort, tailCmd)
 				failCh <- fmt.Errorf("model server process is no longer running; last log lines:\n%s",
 					strings.TrimSpace(string(logTail)))
 				return
 			}
 		default:
+			everAlive = true
 			deadCount = 0
 		}
 
