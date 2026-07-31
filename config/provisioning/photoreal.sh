@@ -23,11 +23,15 @@
 set -u
 
 WORKSPACE="${WORKSPACE:-/workspace}"
-COMFYUI_DIR="${COMFYUI_DIR:-/opt/ComfyUI}"
+# The engine resolves the real tree and exports both of these before running
+# this script; the defaults only matter if it is run by hand. /opt/workspace-
+# internal/ComfyUI is where the vastai/comfy image clones ComfyUI.
+COMFYUI_DIR="${COMFYUI_DIR:-/opt/workspace-internal/ComfyUI}"
+COMFYUI_PYTHON="${COMFYUI_PYTHON:-/venv/main/bin/python}"
 
-# ComfyUI reads models from its own tree. The ai-dock layout under
-# $WORKSPACE/storage is what its init script would have symlinked into place;
-# with that script bypassed, writing directly to the live tree is what works.
+# ComfyUI reads models from its own tree. Writing directly to the live tree is
+# what works, because the image's boot sequence — which would symlink a separate
+# storage layout into place — never runs under runtype "ssh".
 CKPT_DIR="${COMFYUI_DIR}/models/checkpoints"
 VAE_DIR="${COMFYUI_DIR}/models/vae"
 LORA_DIR="${COMFYUI_DIR}/models/loras"
@@ -79,8 +83,22 @@ clone_node() {
     fi
     mkdir -p "${NODE_DIR}"
     log "installing node ${name}"
-    git clone --depth 1 "${url}" "${NODE_DIR}/${name}" \
-        || log "FAILED to clone ${name} — continuing"
+    if ! git clone --depth 1 "${url}" "${NODE_DIR}/${name}"; then
+        log "FAILED to clone ${name} — continuing"
+        return 1
+    fi
+    # A custom node with dependencies is silently skipped at load time if they
+    # are missing — ComfyUI logs the ImportError and carries on without the
+    # node, so the symptom is a workflow that cannot find a node it should
+    # have. They must go into the same virtualenv ComfyUI imports from, which
+    # the engine hands us in COMFYUI_PYTHON; a bare `pip` would hit the system
+    # interpreter, where nothing ComfyUI runs would ever see them.
+    if [ -f "${NODE_DIR}/${name}/requirements.txt" ]; then
+        log "installing requirements for ${name}"
+        "${COMFYUI_PYTHON}" -m pip install --no-cache-dir \
+            -r "${NODE_DIR}/${name}/requirements.txt" \
+            || log "WARNING: requirements for ${name} failed; the node may not load"
+    fi
 }
 
 log "workspace=${WORKSPACE} comfyui=${COMFYUI_DIR}"
@@ -134,6 +152,9 @@ fetch "https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth"
 # models and nodes from inside the web UI, so a missing checkpoint does not mean
 # editing this file and redeploying. It reads CIVITAI_TOKEN, which is the route
 # to civitai.com — where most community portrait fine-tunes and LoRAs live.
+#
+# The vastai/comfy image already bundles it, so this is a no-op there and a
+# fallback on any image that does not.
 clone_node "https://github.com/ltdrdata/ComfyUI-Manager"
 clone_node "https://github.com/cubiq/ComfyUI_essentials"
 

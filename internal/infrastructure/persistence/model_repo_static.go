@@ -64,15 +64,18 @@ import (
 var defaultModels = []*entity.Model{
 	// --- Image Generation ---
 	{
-		// 48 GB ComfyUI. The ai-dock image ships ComfyUI + ComfyUI-Manager. The
-		// image's own HTTP auth is disabled through EngineType's EnvVars — the SSH
-		// tunnel is the access control. Checkpoints are pulled on demand through
-		// the UI, so DownloadGB is 0 and there is no download progress to report.
+		// 48 GB ComfyUI on vast.ai's own image, which ships ComfyUI +
+		// ComfyUI-Manager. No HTTP auth exists to disable: runtype "ssh" replaces
+		// the ENTRYPOINT, so the portal stack never starts and the engine launches
+		// main.py itself — the SSH tunnel is the access control. Checkpoints are
+		// pulled on demand through the UI or by a --provisioning script, so
+		// DownloadGB is 0 and there is no download progress to report.
 		//
-		// StartupTimeout is dominated by the image, not by any download: the
-		// ai-dock image is far larger than llama.cpp's ~2.6 GB compressed, and the
-		// provisioning phase alone has been measured at 9.3 minutes on a slow host
-		// with the small one. 10 minutes could not cover provisioning by itself.
+		// StartupTimeout is dominated by the image, not by any download: at ~9.5 GB
+		// compressed it dwarfs llama.cpp's ~2.6 GB, and the provisioning phase alone
+		// has been measured at 9.3 minutes on a slow host with the small one. 10
+		// minutes could not cover provisioning by itself. A provisioning script's
+		// own downloads come out of the same budget — photoreal.sh pulls ~14 GB.
 		Name:           "comfyui",
 		Alias:          "comfyui",
 		Category:       entity.CategoryImageGen,

@@ -1,3 +1,7 @@
 /mycodeagent
 *.db
 /dist/
+
+# Created in the working directory by the rsync loop `init`/`tunnel` start for
+# ComfyUI — generated images and saved workflows pulled off the instance.
+/COMFY_SYNC/

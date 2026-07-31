@@ -188,16 +188,30 @@ func TestMultiEngineRoutesByEngineType(t *testing.T) {
 	}
 }
 
-// ComfyUI is reachable only through the SSH tunnel, so its own HTTP auth just
-// locks the operator out. The engine used to *describe* these variables in a
-// comment while setting nothing.
-func TestComfyUIDisablesItsOwnWebAuth(t *testing.T) {
+// ComfyUI is reachable only through the SSH tunnel, and nothing in the image
+// stands between the tunnel and the server: runtype "ssh" replaces the
+// ENTRYPOINT, so the caddy/portal stack that would ask for a password never
+// starts and BuildOnstart runs main.py directly.
+//
+// The engine used to set WEB_ENABLE_AUTH=false, USERNAME and PASSWORD to switch
+// off the *ai-dock* image's auth. Those names mean nothing to vastai/comfy.
+// Config that no longer has a consumer is worse than no config: it reads like a
+// live safeguard, so the next person to touch this trusts a variable that has
+// not done anything since the image changed.
+func TestComfyUICarriesNoDeadAuthConfig(t *testing.T) {
 	env := NewComfyUIEngine().EnvVars(nil)
-	if len(env) == 0 {
-		t.Fatal("ComfyUI sets no environment; the image's auth defaults apply behind the tunnel")
+	for _, dead := range []string{"WEB_ENABLE_AUTH", "USERNAME", "PASSWORD", "WEB_USER", "WEB_PASSWORD"} {
+		if v, ok := env[dead]; ok {
+			t.Errorf("%s=%q is set, but no process in this image reads it — the tunnel is the access control", dead, v)
+		}
 	}
-	if v, ok := env["WEB_ENABLE_AUTH"]; !ok || v != "false" {
-		t.Errorf("WEB_ENABLE_AUTH = %q (present: %v), want \"false\"", v, ok)
+
+	// The claim above only holds while we launch the server ourselves. If the
+	// onstart ever defers to the image's boot sequence, auth comes back and this
+	// test has to be revisited rather than deleted.
+	onstart := NewComfyUIEngine().BuildOnstart(&entity.Model{Name: "comfyui"}, 1, 0, "")
+	if !strings.Contains(onstart, "main.py") {
+		t.Error("onstart no longer launches main.py directly; the image's auth stack may now apply")
 	}
 }
 
@@ -297,5 +311,87 @@ func TestComfyUIOnstartUsesTheVenvInterpreter(t *testing.T) {
 	sysAt := strings.Index(onstart, "command -v python3")
 	if venvAt < 0 || (sysAt >= 0 && sysAt < venvAt) {
 		t.Error("the system interpreter is consulted before the venv one")
+	}
+}
+
+// onstartPayload returns the startup script an onstart command would write to
+// the instance.
+//
+// Every engine emits the same shape:
+//
+//	echo '<script>' > /tmp/x.sh && chmod +x /tmp/x.sh && bash /tmp/x.sh 2>&1 | tee …
+//
+// with each single quote in the script rewritten as '\” so it survives the
+// surrounding quotes. The script is therefore *inside* a quoted string, which is
+// the subtlety that matters for the test below: a syntax error in the script is
+// invisible to anything parsing the command, because to a parser it is one long
+// literal. Unwrapping is what makes it checkable.
+//
+// The boundary is the last `' > ` in the command. An escaped quote in the script
+// can produce that sequence too, but only ever before this one — everything
+// following it is the fixed tail of paths and pipes.
+func onstartPayload(t *testing.T, onstart string) string {
+	t.Helper()
+	const open = "echo '"
+	if !strings.HasPrefix(onstart, open) {
+		t.Fatalf("onstart does not start with the expected wrapper: %.60s…", onstart)
+	}
+	end := strings.LastIndex(onstart, "' > ")
+	if end < len(open) {
+		t.Fatalf("onstart has no closing quote before its redirect: %.60s…", onstart)
+	}
+	return strings.ReplaceAll(onstart[len(open):end], `'\''`, "'")
+}
+
+// The onstart scripts are built by fmt.Sprintf and then quoted into a one-line
+// command. A mistake in either half — an unbalanced `if`, a stray verb from a
+// miscounted argument list — does not fail the build and does not fail any
+// assertion about substrings. It is discovered when a rented GPU has already
+// spent its whole startup budget on a script bash refused to parse.
+//
+// So parse them here, with `bash -n`, which reads for syntax and executes
+// nothing.
+//
+// Checking the command as handed over is not enough, and the first version of
+// this test made exactly that mistake: it passed `bash -n` the whole onstart,
+// where the script is a single-quoted literal. Deleting a `fi` from the script
+// left the test green, because the command around it still parsed. The script
+// has to be unwrapped first — hence onstartPayload. Both layers are checked:
+// the payload for the script's own syntax, the command for the quoting that
+// carries it.
+func TestOnstartScriptsAreValidShell(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+
+	parses := func(t *testing.T, label, src string) {
+		t.Helper()
+		cmd := exec.Command(bash, "-n")
+		cmd.Stdin = strings.NewReader(src)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("%s is not valid shell: %v\n%s", label, err, out)
+		}
+	}
+
+	for name, e := range allEngines() {
+		t.Run(name, func(t *testing.T) {
+			model := &entity.Model{Name: name, HFRepo: "org/repo", Quant: "Q4_K_M"}
+			onstart := e.BuildOnstart(model, 1, 32768, "hf_token")
+
+			// A miscounted Sprintf leaves %!s(MISSING) or %!d(EXTRA …) behind.
+			// Those are valid shell — a word is a word — so bash -n reports
+			// nothing and the instance runs a script with a hole in it.
+			if i := strings.Index(onstart, "%!"); i >= 0 {
+				end := i + 80
+				if end > len(onstart) {
+					end = len(onstart)
+				}
+				t.Errorf("onstart has a formatting error from a miscounted argument list: %q", onstart[i:end])
+			}
+
+			parses(t, "the startup script", onstartPayload(t, onstart))
+			parses(t, "the onstart command", onstart)
+		})
 	}
 }
