@@ -226,3 +226,49 @@ func TestDockerImagesArePinned(t *testing.T) {
 		})
 	}
 }
+
+// Both regressions cost a full rental on a live deploy, and both came from
+// assuming the image's own boot sequence runs. Under runtype "ssh" vast.ai
+// replaces the ENTRYPOINT, so /opt/ai-dock/bin/init.sh never executes.
+func TestComfyUIOnstartDoesNotDependOnTheImageBootSequence(t *testing.T) {
+	onstart := NewComfyUIEngine().BuildOnstart(&entity.Model{Name: "comfyui"}, 1, 0, "")
+
+	// supervisord's caddy unit interpolates %(ENV_WORKSPACE)s. WORKSPACE is
+	// exported by init.sh, so supervisord refuses to start on an unexpandable
+	// name — and the deploy that preferred it never reached its fallback,
+	// leaving nothing on 8188 until the deadline.
+	if strings.Contains(onstart, "supervisord") {
+		t.Error("onstart still reaches for supervisord, which cannot start under runtype ssh")
+	}
+
+	// WORKSPACE has to be set here instead, or provisioning scripts write models
+	// relative to an empty path.
+	if !strings.Contains(onstart, "WORKSPACE") {
+		t.Error("onstart does not establish WORKSPACE")
+	}
+
+	// PROVISIONING_SCRIPT was delivered to the container and read by nobody:
+	// init.sh is its only other consumer. `--provisioning` did nothing at all.
+	if !strings.Contains(onstart, "PROVISIONING_SCRIPT") {
+		t.Error("onstart never reads PROVISIONING_SCRIPT — the flag would be inert")
+	}
+	if !strings.Contains(onstart, "curl") || !strings.Contains(onstart, "provisioning.sh") {
+		t.Error("onstart does not fetch and run the provisioning script")
+	}
+
+	// Ordering matters: models must land before the server opens, or the UI
+	// comes up with an empty checkpoint list.
+	// Match the launch itself, not the directory probe — that also mentions
+	// main.py and comes first by design.
+	provisionAt := strings.Index(onstart, "PROVISIONING_SCRIPT")
+	launchAt := strings.Index(onstart, "nohup")
+	if provisionAt < 0 || launchAt < 0 || provisionAt > launchAt {
+		t.Errorf("provisioning must run before ComfyUI is launched (provision@%d launch@%d)", provisionAt, launchAt)
+	}
+
+	// A provisioning failure must not take the instance with it — an empty
+	// ComfyUI you can add models to beats no ComfyUI at all.
+	if !strings.Contains(onstart, "continuing without it") {
+		t.Error("a failed provisioning script should be survivable, not fatal")
+	}
+}

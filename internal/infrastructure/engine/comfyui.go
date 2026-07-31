@@ -56,38 +56,64 @@ func (e *ComfyUIEngine) EnvVars(model *entity.Model) map[string]string {
 
 // BuildOnstart writes and runs the startup script.
 //
-// It launches ComfyUI itself rather than relying on the image ENTRYPOINT:
-// instances are created with runtype "ssh", and vast.ai replaces the entrypoint
-// in that mode. The previous version only polled /history and waited for a
-// supervisord that never ran, then exited 0 either way — so a container that
-// started nothing was indistinguishable from a healthy one.
+// The script does everything itself and relies on nothing the image would
+// normally do at boot. Under runtype "ssh" vast.ai replaces the ENTRYPOINT, so
+// /opt/ai-dock/bin/init.sh never runs — and that script is what sets WORKSPACE,
+// fetches PROVISIONING_SCRIPT and starts the services. Two failures observed on
+// a live deploy follow directly from assuming otherwise:
 //
-// supervisord is still preferred when present, because the ai-dock image wires
-// its own service management; the direct launch is the fallback. The exact
-// install path is resolved at runtime instead of assumed, the same approach
-// llama.cpp's script uses for its binary.
+//   - Preferring supervisord killed the deploy outright. Its caddy unit
+//     interpolates %(ENV_WORKSPACE)s, WORKSPACE is set by the init script that
+//     never ran, and supervisord refuses to start on an unexpandable name. The
+//     direct-launch branch then never executed, so nothing listened on 8188 and
+//     the deploy burned its whole budget. supervisord is gone from this script:
+//     under this runtype it cannot work.
+//
+//   - PROVISIONING_SCRIPT was delivered to the container and read by nobody.
+//     init.sh is its only consumer, so `--provisioning` silently did nothing.
+//     The script is now fetched and run here, before ComfyUI starts, which is
+//     the ordering models need.
 func (e *ComfyUIEngine) BuildOnstart(model *entity.Model, numGPUs, contextLength int, hfToken string) string {
 	script := fmt.Sprintf(`set -e
 echo "ComfyUI instance starting (GPUs: %d)" > %s
 if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi >> %s 2>&1 || true; fi
 
-if command -v supervisord >/dev/null 2>&1 && [ -f /etc/supervisor/supervisord.conf ]; then
-    echo "Starting via supervisord" >> %s
-    nohup supervisord -c /etc/supervisor/supervisord.conf >> %s 2>&1 &
-else
-    DIR=""
-    for d in /opt/ComfyUI /opt/comfyui /workspace/ComfyUI /ComfyUI /root/ComfyUI; do
-        if [ -f "$d/main.py" ]; then DIR="$d"; break; fi
-    done
-    if [ -z "$DIR" ]; then
-        echo "FATAL: ComfyUI main.py not found in any known location" >> %s
-        exit 1
-    fi
-    echo "Starting ComfyUI from $DIR" >> %s
-    PY=$(command -v python3 || command -v python)
-    cd "$DIR"
-    nohup "$PY" main.py --listen 0.0.0.0 --port %d >> %s 2>&1 &
+# WORKSPACE is normally exported by the image's init script, which this runtype
+# prevents from running. Provisioning scripts write models relative to it.
+export WORKSPACE="${WORKSPACE:-/workspace}"
+mkdir -p "$WORKSPACE"
+echo "WORKSPACE=$WORKSPACE" >> %s
+
+DIR=""
+for d in /opt/ComfyUI /opt/comfyui "$WORKSPACE/ComfyUI" /ComfyUI /root/ComfyUI; do
+    if [ -f "$d/main.py" ]; then DIR="$d"; break; fi
+done
+if [ -z "$DIR" ]; then
+    echo "FATAL: ComfyUI main.py not found in any known location" >> %s
+    exit 1
 fi
+export COMFYUI_DIR="$DIR"
+echo "ComfyUI at $DIR" >> %s
+
+# Provisioning runs before the server so models are present when it opens.
+# A failure here is not fatal: an empty ComfyUI you can add models to beats no
+# ComfyUI at all, and the log says which happened.
+if [ -n "$PROVISIONING_SCRIPT" ]; then
+    echo "Provisioning from $PROVISIONING_SCRIPT" >> %s
+    if curl -fsSL -o /tmp/provisioning.sh "$PROVISIONING_SCRIPT"; then
+        chmod +x /tmp/provisioning.sh
+        bash /tmp/provisioning.sh >> %s 2>&1 \
+            && echo "Provisioning finished" >> %s \
+            || echo "WARNING: provisioning script failed; continuing without it" >> %s
+    else
+        echo "WARNING: could not fetch provisioning script; continuing" >> %s
+    fi
+fi
+
+echo "Starting ComfyUI from $DIR" >> %s
+PY=$(command -v python3 || command -v python)
+cd "$DIR"
+nohup "$PY" main.py --listen 0.0.0.0 --port %d >> %s 2>&1 &
 
 for i in $(seq 1 150); do
     if curl -sf http://localhost:%d/history >/dev/null 2>&1; then
@@ -99,8 +125,10 @@ done
 echo "FATAL: ComfyUI did not answer on %d within 300s" >> %s
 exit 1`,
 		numGPUs, comfyUILogPath, comfyUILogPath,
+		comfyUILogPath,
 		comfyUILogPath, comfyUILogPath,
-		comfyUILogPath, comfyUILogPath,
+		comfyUILogPath, comfyUILogPath, comfyUILogPath, comfyUILogPath, comfyUILogPath,
+		comfyUILogPath,
 		comfyUIServerPort, comfyUILogPath,
 		comfyUIServerPort, comfyUIServerPort, comfyUILogPath,
 		comfyUIServerPort, comfyUILogPath)
