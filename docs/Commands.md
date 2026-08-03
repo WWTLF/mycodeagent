@@ -25,19 +25,19 @@ That puts the binary in `$(go env GOPATH)/bin` — make sure it is on your `PATH
 
 ```bash
 export PATH="$PATH:$(go env GOPATH)/bin"
-mycodeagent --version        # mycodeagent version v0.2.0
+mycodeagent --version        # mycodeagent version v0.2.1
 ```
 
 Pin a version instead of tracking the latest release:
 
 ```bash
-go install github.com/WWTLF/mycodeagent/cmd/mycodeagent@v0.2.0
+go install github.com/WWTLF/mycodeagent/cmd/mycodeagent@v0.2.1
 ```
 
 The version is reported even from a `go install` build, because it falls back to
 the module version Go records in `debug.BuildInfo` when no `-ldflags` stamp is
 present. A build from a git checkout gets the stamp instead and reports the exact
-commit (`v0.2.0-3-gabc1234`).
+commit (`v0.2.1-3-gabc1234`).
 
 Prebuilt tarballs are on the [releases
 page](https://github.com/WWTLF/mycodeagent/releases) for linux and darwin,
