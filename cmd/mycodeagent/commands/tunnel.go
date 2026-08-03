@@ -11,8 +11,8 @@ import (
 
 func NewTunnelCmd(app *application.App) *cobra.Command {
 	return &cobra.Command{
-		Use:   "tunnel <id>",
-		Short: "Re-establish SSH tunnel to an existing instance",
+		Use:   "tunnel <vastai_id>",
+		Short: "Re-establish SSH tunnel to an existing instance (takes the VAST ID, not the local one)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
