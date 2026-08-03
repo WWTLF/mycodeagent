@@ -228,3 +228,81 @@ func TestResolverNeverCreatesForAPullOnlyDir(t *testing.T) {
 		t.Error("pull-only resolver created a remote directory")
 	}
 }
+
+// --sync-folder must survive being handed to a command that runs somewhere else.
+// The root is stored on the instance and reused by `tunnel` and `start`, so a
+// path left relative would re-resolve against whichever shell ran the later
+// command and quietly split one instance's files across two directories.
+func TestResolveSyncRootReturnsAbsolutePaths(t *testing.T) {
+	wd := t.TempDir()
+	restore, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(wd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(restore) })
+
+	got, err := ResolveSyncRoot("notebooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("relative --sync-folder stayed relative: %q", got)
+	}
+	if !strings.HasSuffix(got, string(filepath.Separator)+"notebooks") {
+		t.Errorf("resolved path lost the folder name: %q", got)
+	}
+}
+
+// An empty flag keeps the historical default, so instances deployed before
+// --sync-folder existed land where their loops already point.
+func TestResolveSyncRootDefaultsToTheWorkingDirectory(t *testing.T) {
+	wd := t.TempDir()
+	restore, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(wd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(restore) })
+
+	got, err := ResolveSyncRoot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(got) != SyncRootName {
+		t.Errorf("default root is %q, want a directory named %q", got, SyncRootName)
+	}
+}
+
+// "~/notebooks" reaches the flag literally whenever it is quoted, and a literal
+// "~" directory in the working directory is never what was meant.
+func TestResolveSyncRootExpandsTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory in this environment")
+	}
+	got, err := ResolveSyncRoot("~/notebooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, "notebooks"); got != want {
+		t.Errorf("ResolveSyncRoot(\"~/notebooks\") = %q, want %q", got, want)
+	}
+}
+
+// An absolute --sync-folder is used as given: it is the root itself, not a
+// parent to create COMFY_SYNC inside. Nesting would make the flag's own value
+// not the directory the files appear in.
+func TestResolveSyncRootUsesAnAbsoluteFolderAsTheRoot(t *testing.T) {
+	got, err := ResolveSyncRoot("/tmp/nb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/tmp/nb" {
+		t.Errorf("ResolveSyncRoot(\"/tmp/nb\") = %q, want /tmp/nb", got)
+	}
+}

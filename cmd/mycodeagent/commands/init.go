@@ -5,9 +5,25 @@ import (
 	"strings"
 
 	"github.com/WWTLF/mycodeagent/internal/application"
+	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 	"github.com/WWTLF/mycodeagent/internal/domain/service"
 	"github.com/spf13/cobra"
 )
+
+// syncFolderHelp explains where an engine's files land locally.
+const syncFolderHelp = `--sync-folder chooses the local directory the instance's files are kept in.
+
+Instances are disposable, so anything an engine writes — notebooks for Jupyter,
+generated images and workflows for ComfyUI — is copied here every 60s and would
+otherwise die with the machine. The default is ./` + entity.DefaultSyncRootName + ` in the
+directory init runs from, which is awkward when that is a source repository.
+
+  --sync-folder ~/notebooks
+
+The path is resolved to an absolute one and stored on the instance, so a later
+'tunnel' or 'start' run from anywhere else still syncs to the same place.
+
+Engines that write nothing (llama.cpp) ignore it.`
 
 // countryHelp lists the codes worth knowing. It is not the ISO table — it is the
 // set that actually had rentable offers when this was written, because a code
@@ -77,6 +93,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 	var createOnly bool
 	var country string
 	var provisioning string
+	var syncFolder string
 
 	cmd := &cobra.Command{
 		Use:   "init <model>",
@@ -84,7 +101,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 		Long: "Rent a GPU, start llama-server and open an SSH tunnel.\n\n" +
 			"The instance is destroyed automatically if startup fails, so a broken\n" +
 			"deploy never leaves a paid GPU running.\n\n" +
-			provisioningHelp + "\n\n" + countryHelp,
+			provisioningHelp + "\n\n" + syncFolderHelp + "\n\n" + countryHelp,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// cmd.Context() carries the SIGINT cancellation wired in main.go —
@@ -97,7 +114,11 @@ func NewInitCmd(app *application.App) *cobra.Command {
 				return err
 			}
 
-			opts := service.DeployOptions{Countries: countries, ProvisioningScript: provisioning}
+			opts := service.DeployOptions{
+				Countries:          countries,
+				ProvisioningScript: provisioning,
+				SyncFolder:         syncFolder,
+			}
 
 			if createOnly {
 				result, err := app.DeployCreateOnly(ctx, args[0], opts)
@@ -136,6 +157,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 	cmd.Flags().BoolVar(&createOnly, "create-instance-only", false, "Create instance and show SSH details without setting up tunnel or waiting for the model server")
 	cmd.Flags().StringVar(&country, "country", "", "Comma-separated ISO-3166 alpha-2 country codes to rent in (see --help for the list)")
 	cmd.Flags().StringVar(&provisioning, "provisioning", "", "URL of a script the instance runs before starting, to fetch models (ComfyUI only)")
+	cmd.Flags().StringVar(&syncFolder, "sync-folder", "", "Local directory to sync notebooks / ComfyUI output into (default ./"+entity.DefaultSyncRootName+")")
 
 	return cmd
 }

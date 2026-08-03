@@ -5,6 +5,18 @@ import (
 	"time"
 )
 
+// DefaultSyncRootName is the directory created in the working directory when no
+// --sync-folder is given.
+//
+// It lives in the domain because three layers need to name it — the command help
+// text, the deploy options doc, and the rsync loop that creates it — and the
+// commands and application layers are forbidden from importing infrastructure,
+// where the loop lives.
+//
+// The name predates Jupyter and is kept for instances already syncing into it,
+// though it now covers notebooks as well as ComfyUI output.
+const DefaultSyncRootName = "COMFY_SYNC"
+
 type InstanceStatus string
 
 const (
@@ -40,8 +52,22 @@ type Instance struct {
 	// would silently shrink the window on a rental with fatter GPUs.
 	ContextLength int
 	// SyncPID is the detached rsync loop pulling the engine's output into
-	// ./COMFY_SYNC. Tracked like TunnelPID so `tunnel` can restart it and
+	// SyncRoot. Tracked like TunnelPID so `tunnel` can restart it and
 	// `stop`/`kill` can end it instead of leaking a process per deploy.
-	SyncPID   int
+	SyncPID int
+	// SyncRoot is the absolute local directory the loop syncs into, recorded at
+	// deploy time.
+	//
+	// It is persisted rather than recomputed because the root used to be
+	// "<cwd>/COMFY_SYNC", and cwd is a property of whichever shell happened to
+	// run the command. `init` in one directory and `tunnel` in another already
+	// produced two different roots, silently splitting one instance's files
+	// across two places; --sync-folder would have widened that from a directory
+	// mistake into an arbitrary one. Storing the resolved path means every later
+	// command targets what the deploy actually chose.
+	//
+	// Empty on rows written before this existed: callers fall back to the old
+	// cwd-derived default, which is what those loops are already using.
+	SyncRoot  string
 	CreatedAt time.Time
 }

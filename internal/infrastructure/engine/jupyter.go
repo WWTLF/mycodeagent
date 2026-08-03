@@ -23,6 +23,22 @@ const (
 	jupyterScriptPath = "/tmp/start_lab.sh"
 	jupyterLogPath    = "/tmp/lab.log"
 
+	// jupyterWorkDir is the directory JupyterLab serves as its file-browser root,
+	// and the one SyncDirs pulls back.
+	//
+	// It has to be set explicitly. Left alone, JupyterLab serves its working
+	// directory, which under `runtype: "ssh"` is /root — so every notebook the
+	// user created landed there while the sync watched /workspace, which the image
+	// does not create. The resolver found no candidate, the loop copied nothing,
+	// and `kill` destroyed the work the sync exists to preserve. Verified on a live
+	// deploy: the lab process reported cwd -> /root and none of the candidates
+	// existed.
+	//
+	// Syncing /root instead would be the wrong repair — it holds .cache, .ssh and
+	// the pip/conda trees, so the loop would haul gigabytes of image content back
+	// on every pass. A dedicated directory keeps the transfer to the user's files.
+	jupyterWorkDir = "/workspace"
+
 	// jupyterProcPattern matches the JupyterLab process in /proc/<pid>/cmdline.
 	// Bracketed like llama.cpp's, so the pattern text cannot match the shell
 	// that carries it: the regex needs a literal "jupyter", and the command
@@ -68,6 +84,8 @@ func (e *JupyterEngine) BuildOnstart(model *entity.Model, numGPUs, contextLength
 echo "Jupyter+PyTorch instance starting (GPUs: %d)" > %s
 if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi >> %s 2>&1 || true; fi
 
+mkdir -p %s
+
 if curl -sf http://localhost:%d/ >/dev/null 2>&1; then
     echo "JupyterLab already serving on %d" >> %s
 else
@@ -80,6 +98,7 @@ else
     fi
     nohup "$BIN" lab --ip=0.0.0.0 --port=%d --no-browser --allow-root \
         --ServerApp.token='' --ServerApp.password='' --ServerApp.allow_origin='*' \
+        --ServerApp.root_dir=%s \
         >> %s 2>&1 &
 fi
 
@@ -93,9 +112,10 @@ done
 echo "FATAL: JupyterLab did not answer on %d within 120s" >> %s
 exit 1`,
 		numGPUs, jupyterLogPath, jupyterLogPath,
+		jupyterWorkDir,
 		jupyterServerPort, jupyterServerPort, jupyterLogPath,
 		jupyterLogPath, jupyterLogPath,
-		jupyterServerPort, jupyterLogPath,
+		jupyterServerPort, jupyterWorkDir, jupyterLogPath,
 		jupyterServerPort, jupyterServerPort, jupyterLogPath,
 		jupyterServerPort, jupyterLogPath)
 
@@ -149,12 +169,30 @@ func (e *JupyterEngine) HealthPath(model *entity.Model) string {
 }
 
 // SyncDirs pulls back the notebook workspace — the whole point of the engine.
+//
+// Two-way, unlike ComfyUI's outputs. Notebooks are source files the operator
+// edits, and an instance is disposable: a pull-only sync would rescue the last
+// session's work and then have no way to put it back on the next machine, so
+// every deploy would start empty with the previous notebooks sitting locally.
+// Push seeds the fresh instance first, then the pull brings changes back.
+//
+// jupyterWorkDir leads the candidate list and is also what BuildOnstart hands
+// --ServerApp.root_dir, so the directory the lab writes to and the directory
+// this reads are the same constant. The remaining candidates cover images that
+// place a workspace elsewhere.
 func (e *JupyterEngine) SyncDirs(model *entity.Model) []entity.SyncDir {
 	return []entity.SyncDir{
 		{
-			RemoteCandidates: []string{"/workspace", "/root/workspace", "/notebooks"},
+			RemoteCandidates: []string{jupyterWorkDir, "/root/workspace", "/notebooks"},
 			Local:            "workspace",
 			Description:      "notebooks and data",
+			Push:             true,
+			// No RootMarker: the push-creation branch it drives is for a leaf that
+			// may never appear on its own (ComfyUI's workflows/). Here the onstart
+			// script mkdir's the root before the lab starts, so the plain
+			// candidate test always finds it. A marker would also have nowhere to
+			// search — the resolver walks up with dirname, and from /workspace the
+			// first step is already /.
 		},
 	}
 }

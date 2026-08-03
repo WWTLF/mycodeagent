@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -309,17 +308,18 @@ func (s *InstanceService) restartSync(inst *entity.Instance) {
 	if len(dirs) == 0 {
 		return
 	}
-	wd, err := os.Getwd()
-	if err != nil {
-		fmt.Printf("Warning: cannot resolve working directory for sync: %v\n", err)
-		return
-	}
-	pid, root, err := s.ssh.StartSync(inst.SSHHost, inst.SSHPort, dirs, wd)
+	// The root the deploy chose, not one derived from this command's working
+	// directory. `tunnel` and `start` are routinely run from somewhere else, and
+	// re-deriving would strand the rest of the instance's files in the old
+	// directory. Empty on pre-SyncRoot rows, which the provider turns back into
+	// the cwd default those loops are already using.
+	pid, root, err := s.ssh.StartSync(inst.SSHHost, inst.SSHPort, dirs, inst.SyncRoot)
 	if err != nil {
 		fmt.Printf("Warning: output sync not restarted: %v\n", err)
 		return
 	}
 	inst.SyncPID = pid
+	inst.SyncRoot = root
 	fmt.Printf("Output sync restarted -> %s\n", root)
 }
 

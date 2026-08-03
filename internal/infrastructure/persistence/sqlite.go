@@ -45,7 +45,8 @@ func migrate(db *sql.DB) error {
 			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			num_gpus    INTEGER NOT NULL DEFAULT 0,
 			context_length INTEGER NOT NULL DEFAULT 0,
-			sync_pid       INTEGER NOT NULL DEFAULT 0
+			sync_pid       INTEGER NOT NULL DEFAULT 0,
+			sync_root      TEXT    NOT NULL DEFAULT ''
 		);
 		CREATE TABLE IF NOT EXISTS bad_hosts (
 			machine_id INTEGER PRIMARY KEY,
@@ -65,6 +66,9 @@ func migrate(db *sql.DB) error {
 	//   num_gpus       — the GPU split the instance was deployed with.
 	//   context_length — the *scaled* window, not the catalog baseline. 0 on
 	//                    legacy rows means "fall back to the model definition".
+	//   sync_root      — the local directory the rsync loop targets. Empty on
+	//                    legacy rows means "the cwd-derived default", which is
+	//                    what their running loops already use.
 	//
 	// Subtractive — leftovers from the removed persistent-volume support. Harmless
 	// (reads use an explicit column list) but they make the schema lie about what
@@ -73,6 +77,7 @@ func migrate(db *sql.DB) error {
 		"ALTER TABLE instances ADD COLUMN num_gpus INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE instances ADD COLUMN context_length INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE instances ADD COLUMN sync_pid INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE instances ADD COLUMN sync_root TEXT NOT NULL DEFAULT ''",
 		"DROP TABLE IF EXISTS volumes",
 		"ALTER TABLE instances DROP COLUMN volume_id",
 		"ALTER TABLE instances DROP COLUMN volume_name",

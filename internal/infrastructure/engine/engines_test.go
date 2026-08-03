@@ -395,3 +395,62 @@ func TestOnstartScriptsAreValidShell(t *testing.T) {
 		})
 	}
 }
+
+// The directory an engine serves from and the directory it syncs back must be
+// the same one.
+//
+// This is the defect that shipped: JupyterLab was launched with no root_dir, so
+// under runtype "ssh" it served its working directory, /root — while SyncDirs
+// watched /workspace, which the image never creates. The resolver found no
+// candidate, the loop copied nothing, and every notebook died with the instance.
+// Verified live before the fix: the lab process reported cwd -> /root and none
+// of the three candidates existed.
+//
+// Asserting the pairing rather than the literal path, so moving the directory
+// stays a one-line change that cannot desynchronise the two halves.
+func TestEnginesSyncTheDirectoryTheyServeFrom(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		engine interface {
+			BuildOnstart(*entity.Model, int, int, string) string
+			SyncDirs(*entity.Model) []entity.SyncDir
+		}
+		model *entity.Model
+	}{
+		{"jupyter", NewJupyterEngine(), &entity.Model{Name: "j", EngineType: entity.EngineJupyter}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dirs := tc.engine.SyncDirs(tc.model)
+			if len(dirs) == 0 {
+				t.Fatal("engine declares no SyncDirs")
+			}
+			script := tc.engine.BuildOnstart(tc.model, 1, 0, "")
+
+			primary := dirs[0].RemoteCandidates[0]
+			if !strings.Contains(script, primary) {
+				t.Errorf("onstart never mentions the synced directory %q — the engine\n"+
+					"writes somewhere the sync does not read:\n%s", primary, script)
+			}
+			// Existing is not enough: it has to be created, or the first pass finds
+			// nothing and a two-way dir has nowhere to push.
+			if !strings.Contains(script, "mkdir -p "+primary) {
+				t.Errorf("onstart does not create %q; the sync resolver skips a\n"+
+					"candidate that does not exist", primary)
+			}
+		})
+	}
+}
+
+// Notebooks are source files the operator edits, and instances are disposable.
+// Pull-only would rescue a session's work and then have no way to put it back on
+// the next machine, so every deploy would start empty with the previous
+// notebooks stranded locally.
+func TestJupyterNotebooksSyncBothWays(t *testing.T) {
+	dirs := NewJupyterEngine().SyncDirs(&entity.Model{Name: "j"})
+	if len(dirs) == 0 {
+		t.Fatal("jupyter declares no SyncDirs")
+	}
+	if !dirs[0].Push {
+		t.Error("notebook directory is pull-only: local notebooks never reach a fresh instance")
+	}
+}
