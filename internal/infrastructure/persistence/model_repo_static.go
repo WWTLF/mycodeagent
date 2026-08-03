@@ -18,7 +18,9 @@ import (
 // That is why the working tiers are DENSE models: a 27B dense uses all 27B
 // parameters per token, whereas a 35B-A3B MoE activates only 3B and behaves closer
 // to a ~10B model. The MoE is far faster (roughly 60-100 vs 20-30 tok/s) but not as
-// strong, so it is kept as one explicit `coder-fast` entry rather than the default.
+// strong, so MoE stays an explicit choice rather than the default: `coder-fast`
+// (24 GB), `coder-fast-max`, `coder-xl` and `coder-glm` (48 GB), plus the
+// uncensored `rude`.
 //
 // Sizing, per GPU:
 //
@@ -27,9 +29,15 @@ import (
 // Usable VRAM is below nameplate (a "24 GB" 3090 reports ~23.4), and KV per token at
 // q8_0 is 2 * n_layers * n_kv_heads * head_dim * ~1.06 bytes:
 //
-//	Qwen3.5-9B       dense  L=32 kv=4  hd=256  ->   68 KB/token
-//	Qwen3.6-27B      dense  L=64 kv=4  hd=256  ->  136 KB/token
-//	Qwen3.6-35B-A3B  MoE    L=40 kv=2  hd=256  ->   42 KB/token
+//	Qwen3.5-9B         dense      L=32 kv=4  hd=256  ->   68 KB/token
+//	Qwen3.6-27B        dense      L=64 kv=4  hd=256  ->  136 KB/token
+//	Qwen3.6-35B-A3B    MoE        L=40 kv=2  hd=256  ->   42 KB/token
+//	Qwen3.5-122B-A10B  MoE        L=48 kv=2  hd=256  ->   51 KB/token
+//	GLM-4.7-Flash      MoE (MLA)  L=47 latent 512+64 ->   54 KB/token @ f16
+//
+// The GLM row does not follow the GQA formula: MLA caches a compressed latent
+// (kv_lora_rank + rope dims) per layer, so its KV is small despite the model's
+// size — verified from the GGUF header, key deepseek2.attention.kv_lora_rank.
 //
 // The dense 27B pays for its capability in context: 136 KB/token is 3.2x the MoE, so
 // the same card holds far less window. That trade is deliberate. See docs/Solution.md.
@@ -42,7 +50,8 @@ import (
 // would auto-download and offload to VRAM. Everything here is served text-only. To
 // enable vision, drop the flag and set Vision: true.
 //
-// No YaRN anywhere: Qwen3.5 and Qwen3.6 are natively 262144 context.
+// No YaRN anywhere: Qwen3.5 and Qwen3.6 are natively 262144 context, and
+// GLM-4.7-Flash 202752.
 //
 // StartupTimeout budget. One context covers the WHOLE deploy — provisioning,
 // SSH, download and weight load all draw on it — so the number has to survive
@@ -275,6 +284,106 @@ var defaultModels = []*entity.Model{
 		StartupTimeout:   30 * time.Minute,
 		ContextLength:    131072, // 25.6 + 17.8 KV + 1.5 = 44.9 of ~47.4
 		MaxContextLength: 262144,
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
+		},
+		Reasoning:   true,
+		Vision:      false,
+		ToolCalling: true,
+	},
+	{
+		// 48 GB, speed-first alternative to `coder-max` — the same trade `coder-fast`
+		// makes at 24 GB, one tier up. UD-Q6_K_XL (~6.5 bpw) is effectively lossless,
+		// so this is the 35B-A3B MoE at full strength; its light KV (42 KB/token vs
+		// the dense 27B's 136) is what buys the FULL native 262k window here, where
+		// the dense flagship caps at 128k on the same card.
+		Name:             "qwen36-35b-a3b-48g",
+		Alias:            "coder-fast-max",
+		HFRepo:           "unsloth/Qwen3.6-35B-A3B-GGUF",
+		Quant:            "UD-Q6_K_XL", // 31.8 GB; "UD-Q6_K" alone would be ambiguous — the repo also ships UD-Q6_K.gguf
+		Category:         entity.CategoryCoding,
+		VRAM:             48,
+		NumGPUs:          1,
+		DiskGB:           46,
+		DownloadGB:       31.8,
+		StartupTimeout:   34 * time.Minute, // 10 provisioning + 31.8 GB / 25 MB/s + 1 load
+		ContextLength:    262144,           // 31.8 + 11.0 KV + 1.5 = 44.3 of ~47.4
+		MaxContextLength: 262144,           // already native — no headroom to scale into
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
+		},
+		Reasoning:   true,
+		Vision:      false,
+		ToolCalling: true,
+	},
+	{
+		// 48 GB, biggest-brain MoE. ~35B-equivalent from 122B total / 10B active:
+		// stronger on paper than the dense 27B and roughly 2x its speed, but at
+		// 2 bpw the quant degradation is real and Qwen3.5 is a generation behind
+		// Qwen3.6 — which is why `coder-max` stayed dense (docs/Solution.md). Kept
+		// as an explicit choice, like every MoE here. KV is 51 KB/token (L=48,
+		// kv=2, hd=256); 128k would land at 47.3 of ~47.4, so the baseline stays
+		// 96k rather than leaning on llama.cpp's auto-fit.
+		Name:             "qwen35-122b-a10b",
+		Alias:            "coder-xl",
+		HFRepo:           "unsloth/Qwen3.5-122B-A10B-GGUF",
+		Quant:            "UD-IQ2_M", // 39.1 GB, single file (larger quants in this repo are multi-part)
+		Category:         entity.CategoryCoding,
+		VRAM:             48,
+		NumGPUs:          1,
+		DiskGB:           52,
+		DownloadGB:       39.1,
+		StartupTimeout:   38 * time.Minute, // 10 provisioning + 39.1 GB / 25 MB/s + 1 load
+		ContextLength:    98304,            // 39.1 + 5.0 KV + 1.5 = 45.6 of ~47.4
+		MaxContextLength: 262144,
+		LlamaArgs: []string{
+			"--jinja",
+			"-fa", "on",
+			"--cache-type-k", "q8_0",
+			"--cache-type-v", "q8_0",
+			"-np", "1",
+			"--cache-reuse", "256",
+			"--reasoning-format", "deepseek",
+			"--no-mmproj",
+		},
+		Reasoning:   true,
+		Vision:      false,
+		ToolCalling: true,
+	},
+	{
+		// 48 GB, the non-Qwen MoE: GLM-4.7-Flash, ~30B total / ~3B active. The GGUF
+		// header (not the config the docs first read) says arch=deepseek2 — MLA, with
+		// kv_lora_rank 512 — so KV is a compressed latent: 47 * (512+64) * 2 bytes
+		// ≈ 54 KB/token even at f16, not the 199 KB/token GQA estimate that
+		// originally kept this model out of the catalog. That is what lets a
+		// near-lossless quant serve the FULL native 202752 window on one card.
+		// Template verified via the HF API: declares tools + thinking.
+		Name:             "glm47-flash",
+		Alias:            "coder-glm",
+		HFRepo:           "unsloth/GLM-4.7-Flash-GGUF",
+		Quant:            "UD-Q6_K_XL", // 26.2 GB; plain "Q6_K" would be ambiguous with Q6_K.gguf in the same repo
+		Category:         entity.CategoryCoding,
+		VRAM:             48,
+		NumGPUs:          1,
+		DiskGB:           40,
+		DownloadGB:       26.2,
+		StartupTimeout:   30 * time.Minute, // 10 provisioning + 26.2 GB / 25 MB/s + 1 load
+		ContextLength:    202752,           // native; 26.2 + 11.0 KV (f16 latent, worst case) + 1.5 = 38.7 of ~47.4
+		MaxContextLength: 202752,           // native ceiling — lower than the Qwen entries' 262144
 		LlamaArgs: []string{
 			"--jinja",
 			"-fa", "on",

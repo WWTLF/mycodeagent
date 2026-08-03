@@ -64,16 +64,19 @@ Then check what's on offer:
 
 ```bash
 $ mycodeagent models
-ALIAS         NAME                        GPUs     CTX   R  V  T  $/HR    GGUF REPO                     QUANT
-comfyui       comfyui                     1x 48GB  -     -  -  -  $0.402                                -
-jupyter       jupyter-pytorch             1x 32GB  -     -  -  -  $0.202                                -
-jupyter-mini  jupyter-pytorch-16g         1x 16GB  -     -  -  -  $0.072                                -
-coder-mini    qwen35-9b                   1x 16GB  64K   +  -  +  $0.067  unsloth/Qwen3.5-9B-GGUF       UD-Q5_K_XL
-coder         qwen36-27b-24g              1x 24GB  32K   +  -  +  $0.116  unsloth/Qwen3.6-27B-GGUF      IQ4_XS
-coder-fast    qwen36-35b-a3b              1x 24GB  64K   +  -  +  $0.116  unsloth/Qwen3.6-35B-A3B-GGUF  UD-IQ4_XS
-coder-hq      qwen36-27b-32g              1x 32GB  64K   +  -  +  $0.202  unsloth/Qwen3.6-27B-GGUF      Q5_K_M
-coder-max     qwen36-27b-48g              1x 48GB  128K  +  -  +  $0.402  unsloth/Qwen3.6-27B-GGUF      UD-Q6_K_XL
-rude          qwen36-35b-a3b-abliterated  1x 32GB  128K  +  -  +  $0.202  mradermacher/Huihui-…         Q4_K_M
+ALIAS           NAME                        GPUs     CTX   R  V  T  $/HR    GGUF REPO                       QUANT
+comfyui         comfyui                     1x 48GB  -     -  -  -  $0.402                                  -
+jupyter         jupyter-pytorch             1x 32GB  -     -  -  -  $0.202                                  -
+jupyter-mini    jupyter-pytorch-16g         1x 16GB  -     -  -  -  $0.072                                  -
+coder-mini      qwen35-9b                   1x 16GB  64K   +  -  +  $0.067  unsloth/Qwen3.5-9B-GGUF         UD-Q5_K_XL
+coder           qwen36-27b-24g              1x 24GB  32K   +  -  +  $0.116  unsloth/Qwen3.6-27B-GGUF        IQ4_XS
+coder-fast      qwen36-35b-a3b              1x 24GB  64K   +  -  +  $0.116  unsloth/Qwen3.6-35B-A3B-GGUF    UD-IQ4_XS
+coder-hq        qwen36-27b-32g              1x 32GB  64K   +  -  +  $0.202  unsloth/Qwen3.6-27B-GGUF        Q5_K_M
+coder-max       qwen36-27b-48g              1x 48GB  128K  +  -  +  $0.402  unsloth/Qwen3.6-27B-GGUF        UD-Q6_K_XL
+coder-fast-max  qwen36-35b-a3b-48g          1x 48GB  256K  +  -  +  $0.402  unsloth/Qwen3.6-35B-A3B-GGUF    UD-Q6_K_XL
+coder-xl        qwen35-122b-a10b            1x 48GB  96K   +  -  +  $0.402  unsloth/Qwen3.5-122B-A10B-GGUF  UD-IQ2_M
+coder-glm       glm47-flash                 1x 48GB  198K  +  -  +  $0.402  unsloth/GLM-4.7-Flash-GGUF      UD-Q6_K_XL
+rude            qwen36-35b-a3b-abliterated  1x 32GB  128K  +  -  +  $0.202  mradermacher/Huihui-…           Q4_K_M
 ```
 
 `R`/`V`/`T` are reasoning, vision, tool-calling. Prices are live — the cheapest
@@ -89,6 +92,9 @@ this was written. The top three aren't language models, so most columns don't ap
 | `coder-fast` | You need speed over depth — ~3× the tokens/s, but behaves like a ~10B model. |
 | `coder-hq` | Same 27B, better quant, double the window. |
 | `coder-max` | Best quality this tool offers. 27B at ~6.5 bits, 128k window. |
+| `coder-fast-max` | `coder-fast` at full strength — the same 35B-A3B at ~6.5 bits, and its light KV buys the full native 256k window. |
+| `coder-xl` | Biggest on paper: 122B total, 10B active. Only fits at 2 bits, and it's a generation behind — reach for it when breadth beats precision. |
+| `coder-glm` | The non-Qwen option. GLM-4.7-Flash, ~3B active, 198k window at a near-lossless quant. |
 | `rude` | Uncensored. Fast MoE, 128k window. |
 | `comfyui` | Not a language model — image generation. |
 | `jupyter` | Not a language model — a GPU notebook. 32 GB. |
