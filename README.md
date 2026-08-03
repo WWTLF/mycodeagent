@@ -38,8 +38,8 @@ Or grab a binary from [Releases](https://github.com/WWTLF/mycodeagent/releases) 
 Linux and macOS, amd64 and arm64:
 
 ```bash
-tar xzf mycodeagent_v0.2.0_linux_amd64.tar.gz
-sudo mv mycodeagent_v0.2.0_linux_amd64 /usr/local/bin/mycodeagent
+tar xzf mycodeagent_v0.2.1_linux_amd64.tar.gz
+sudo mv mycodeagent_v0.2.1_linux_amd64 /usr/local/bin/mycodeagent
 ```
 
 Windows is not built yet: the tunnel uses `Setpgid` and `syscall.Kill`, which don't
