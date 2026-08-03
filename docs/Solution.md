@@ -294,7 +294,7 @@ graph LR
 
 ### Per-Model Catalog & Timeouts
 
-The catalog spans four VRAM tiers — **16 / 24 / 32 / 48 GB** — plus a speed-first alternative at 24 GB and one uncensored model at 32 GB. Everything is single-GPU. Every `HFRepo` + `Quant` pair was verified against the HuggingFace API (the repo exists, the quant tag matches exactly one file, and the chat template really declares thinking + tool support). `DiskGB` is the container disk requested (image + download + scratch); the offer search additionally requires the *host* to have `DiskGB + 12 GB` free.
+The catalog spans four VRAM tiers — **16 / 24 / 32 / 48 GB** — plus explicit MoE entries (`coder-fast` at 24 GB; `coder-fast-max`, `coder-xl` and `coder-glm` at 48 GB) and one uncensored model at 32 GB. Everything is single-GPU. Every `HFRepo` + `Quant` pair was verified against the HuggingFace API (the repo exists, the quant tag matches exactly one file, and the chat template really declares thinking + tool support). `DiskGB` is the container disk requested (image + download + scratch); the offer search additionally requires the *host* to have `DiskGB + 12 GB` free.
 
 | Tier | Model | Alias | Repo | Quant | Weights | Active | Disk | Context | Timeout |
 |---|---|---|---|---|---|---|---|---|---|
@@ -303,9 +303,12 @@ The catalog spans four VRAM tiers — **16 / 24 / 32 / 48 GB** — plus a speed-
 | 24 GB | `qwen36-35b-a3b` | `coder-fast` | unsloth/Qwen3.6-35B-A3B-GGUF | UD-IQ4_XS | 17.7 GB | **3B** | 32 GB | 64k | 24 min |
 | 32 GB | `qwen36-27b-32g` | `coder-hq` | unsloth/Qwen3.6-27B-GGUF | Q5_K_M | 19.5 GB | 27B | 32 GB | 64k | 26 min |
 | 48 GB | `qwen36-27b-48g` | `coder-max` | unsloth/Qwen3.6-27B-GGUF | UD-Q6_K_XL | 25.6 GB | 27B | 38 GB | **128k** | 30 min |
+| 48 GB | `qwen36-35b-a3b-48g` | `coder-fast-max` | unsloth/Qwen3.6-35B-A3B-GGUF | UD-Q6_K_XL | 31.8 GB | **3B** | 46 GB | **256k** | 34 min |
+| 48 GB | `qwen35-122b-a10b` | `coder-xl` | unsloth/Qwen3.5-122B-A10B-GGUF | UD-IQ2_M | 39.1 GB | **10B** | 52 GB | 96k | 38 min |
+| 48 GB | `glm47-flash` | `coder-glm` | unsloth/GLM-4.7-Flash-GGUF | UD-Q6_K_XL | 26.2 GB | **3B** | 40 GB | **198k (native)** | 30 min |
 | 32 GB | `qwen36-35b-a3b-abliterated` | `rude` | mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF | Q4_K_M | 21.2 GB | **3B** | 34 GB | **128k** | 26 min |
 
-`MaxContextLength` is 262144 (native) on every entry, so `scaledContextLength` grows the window whenever the rented offer has more per-GPU VRAM than the tier baseline. If `StartupTimeout` is unset the default is **20 minutes**.
+`MaxContextLength` is the native window on every entry — 262144 for the Qwen models, 202752 for GLM-4.7-Flash — so `scaledContextLength` grows the window whenever the rented offer has more per-GPU VRAM than the tier baseline (`coder-glm` already starts at its ceiling and never scales). If `StartupTimeout` is unset the default is **20 minutes**.
 
 #### Where the timeout numbers come from
 
@@ -331,7 +334,7 @@ The crash path is deliberately excluded. A dead `llama-server` means a bad quant
 
 The working tiers are **dense** models, chosen deliberately. A dense 27B uses all 27B parameters on every token; a 35B-A3B MoE activates only 3B and behaves closer to a ~10B model. The MoE is roughly 3× faster (≈60–100 vs ≈20–30 tok/s) and holds far more context — but at ~20–30 tok/s the dense model is still comfortable for interactive coding, so the extra speed buys nothing that capability wouldn't buy better.
 
-The MoE is kept as one explicit `coder-fast` entry on the same 24 GB card, so the trade is a choice rather than a default:
+MoE is kept as explicit entries — `coder-fast` on the same 24 GB card as `coder`, and `coder-fast-max` / `coder-xl` / `coder-glm` alongside `coder-max` at 48 GB — so the trade is a choice rather than a default:
 
 | At 24 GB | `coder` (dense 27B) | `coder-fast` (MoE 35B-A3B) |
 |---|---|---|
@@ -357,16 +360,22 @@ Usable VRAM sits below nameplate — a "24 GB" 3090 reports ~23.4 — and KV per
 | Qwen3.5-9B | dense | 32 | 4 | 256 | 68 KB |
 | Qwen3.6-27B | dense | 64 | 4 | 256 | **136 KB** |
 | Qwen3.6-35B-A3B | MoE | 40 | **2** | 256 | **42 KB** |
-| Qwen3.5-122B-A10B (not used) | MoE | 48 | 2 | 256 | 51 KB |
-| GLM-4.7-Flash (not used) | MoE-Lite | 47 | **20** | 102 | 199 KB |
+| Qwen3.5-122B-A10B | MoE | 48 | 2 | 256 | 51 KB |
+| GLM-4.7-Flash | MoE (**MLA**) | 47 | — latent 512+64 | — | **54 KB @ f16** |
 
-The dense 27B's 136 KB/token is 3.2× the MoE's, which is the whole reason `coder` gets 32k where `coder-fast` gets 64k on the same card. GLM-4.7-Flash was passed over for the opposite extreme: 199 KB/token eats 13 GB at 64k.
+The dense 27B's 136 KB/token is 3.2× the MoE's, which is the whole reason `coder` gets 32k where `coder-fast` gets 64k on the same card.
+
+The GLM row does not follow the GQA formula, and an earlier revision of this table got it wrong because of that: reading GLM-4.7-Flash's config as GQA (20 KV heads × head_dim 102) gave 199 KB/token — 13 GB at 64k — and kept the model out of the catalog. The GGUF header says otherwise: `general.architecture = deepseek2`, `kv_lora_rank = 512` — it is **MLA**, like GLM-5.2 and Kimi-K3 below, so the cache is a compressed latent of `47 × (512 + 64)` elements ≈ 54 KB/token even at f16. Its full native 202752 window costs ~11 GB, which is what makes `coder-glm` possible.
 
 **Quant tags must be unique substrings** of a filename in the repo. `Q6_K` is **not** — it also matches `UD-Q6_K_XL`, and llama.cpp would silently resolve to whichever it finds first. That is why the 32 GB tier uses `Q5_K_M` and the 48 GB tier names `UD-Q6_K_XL` explicitly. Verify any new tag against the repo's file list before adding it.
 
-**Also considered for 48 GB:** `Qwen3.5-122B-A10B` at `UD-IQ2_M` (39.1 GB, ~35B-equivalent, 10B active). Bigger on paper and would fit at 126k, but 2-bit degradation is real and it is a generation behind Qwen3.6 — the near-lossless 27B was the safer capability bet.
+**The 48 GB MoE entries.** `coder-fast-max` is the 35B-A3B at `UD-Q6_K_XL` (~6.5 bpw, effectively lossless) — and at 42 KB/token the full native 262k window fits: 31.8 + 11.0 + 1.5 = 44.3 of ~47.4. `coder-xl` is `Qwen3.5-122B-A10B` at `UD-IQ2_M` (39.1 GB, ~35B-equivalent, 10B active) — bigger on paper than the dense 27B, but 2-bit degradation is real and it is a generation behind Qwen3.6, which is why `coder-max` stayed the near-lossless dense 27B and this is an explicit alternative. Its baseline context is 96k, not 128k: at 51 KB/token, 128k lands at 47.3 of ~47.4 usable — zero margin — so the catalog does not lean on llama.cpp's auto-fit. Its larger quants are multi-part files in subdirectories; `UD-IQ2_M` is the biggest single-file quant that fits the card.
 
-**No YaRN anywhere.** Qwen3.5 and Qwen3.6 are natively 262144 context, so the `--rope-scaling` / `--rope-scale` / `--yarn-orig-ctx` triple the old Qwen3 / Qwen2.5 catalog needed is gone — along with the short-context quality it cost.
+`coder-glm` is the non-Qwen option: GLM-4.7-Flash (~30B total / ~3B active) at `UD-Q6_K_XL` (26.2 GB). MLA's tiny latent cache means the full native 202752 window fits with room to spare — 26.2 + 11.0 (f16 latent, worst case) + 1.5 = 38.7 of ~47.4 — so unlike every other entry, its baseline context IS its ceiling and `scaledContextLength` has nothing to do. Note the lower native ceiling: 202752, not the Qwen entries' 262144. The template (verified via the HF API) declares tools + thinking; `--reasoning-format deepseek` applies to GLM's `<think>` tags as well. The REAP-pruned variant (`GLM-4.7-Flash-REAP-23B-A3B`) stays out: it exists for cards this quant does not fit, and at 48 GB the unpruned model at the same bpw is strictly more capable.
+
+Assessed and passed over for the non-Qwen slot: **Kimi-Linear-48B-A3B** (linear-attention MoE — fits at ~Q6, but a niche arch on our pinned llama.cpp build is a deploy-time risk, and its coding record is thinner than GLM's); **MiniMax-M2.x REAP-139B** (only fits at ~2-bit *and* expert-pruned — two quality hits stacked); **Ling-flash-2.0** (100B-A6.1B, only fits at Q3, a generation behind); **gpt-oss-120b** (63 GB MXFP4 does not fit 48 GB, and gpt-oss-20b belongs to a lower tier).
+
+**No YaRN anywhere.** Qwen3.5 and Qwen3.6 are natively 262144 context and GLM-4.7-Flash is natively 202752, so the `--rope-scaling` / `--rope-scale` / `--yarn-orig-ctx` triple the old Qwen3 / Qwen2.5 catalog needed is gone — along with the short-context quality it cost.
 
 **Vision is off.** Several of these repos ship a ~0.9 GB `mmproj` vision projector that `-hf` auto-downloads and offloads to VRAM. Everything is served text-only via `--no-mmproj`. To enable vision, drop the flag and set `Vision: true`.
 
