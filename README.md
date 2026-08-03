@@ -191,20 +191,32 @@ out.
 ### Getting your work back
 
 This is the part that matters, because **`kill` destroys the disk**. A rsync loop
-runs while the instance lives and mirrors into a `COMFY_SYNC/` directory in your
+runs while the instance lives and mirrors into a `workspace/` directory in your
 current working directory, every 60 seconds:
 
 ```
 $ mycodeagent init comfyui
 ...
-Syncing output + workflows to /home/you/project/COMFY_SYNC every 60s
+Syncing output + workflows to /home/you/project/workspace every 60s
 ```
 
-| Directory | Direction | Why |
-|---|---|---|
-| `COMFY_SYNC/output` | down only | Generated images. The instance is their only author. |
-| `COMFY_SYNC/workflows` | **both ways** | Workflows are source files. Edit them locally and they reach the instance; save one in the UI and it lands here. |
-| `COMFY_SYNC/workspace` | **both ways** | Jupyter's `/workspace` — notebooks and data. Notebooks are source files too: they survive the instance and seed the next one. |
+`--sync-folder` puts it somewhere else, and the path is used as given:
+
+```bash
+mycodeagent init jupyter --sync-folder ~/notebooks
+mycodeagent init jupyter --sync-folder .        # this directory *is* the workspace
+```
+
+| Engine | Local | Direction | Why |
+|---|---|---|---|
+| Jupyter | the sync folder itself | **both ways** | `/workspace` on the instance — notebooks and data. Notebooks are source files: they survive the instance and seed the next one. |
+| ComfyUI | `output/` | down only | Generated images. The instance is their only author. |
+| ComfyUI | `workflows/` | **both ways** | Workflows are source files. Edit them locally and they reach the instance; save one in the UI and it lands here. |
+
+Jupyter has one synced directory, so it uses the sync folder directly — point
+`--sync-folder` at a project and that project is the workspace. ComfyUI has two
+and keeps them as subfolders; merged, the push leg would upload every generated
+image into the instance's workflow folder.
 
 Two-way means your work survives the instance and seeds the next one: `init`
 uploads what's already there before pulling anything down.
@@ -220,12 +232,15 @@ in the first place — re-fetching costs less than uploading over a home connect
 
 If the tunnel dies, `mycodeagent tunnel <vastai_id>` restarts the sync along with it.
 
-**Choosing where it lands.** `COMFY_SYNC/` in the working directory is awkward when
+**Choosing where it lands.** `workspace/` in the working directory is awkward when
 that directory is a source repository. `--sync-folder` picks somewhere else:
 
 ```bash
 mycodeagent init jupyter --sync-folder ~/notebooks
-# notebooks appear in ~/notebooks/workspace/
+# notebooks appear in ~/notebooks/ itself — Jupyter has one synced directory
+
+mycodeagent init comfyui --sync-folder ~/art
+# ~/art/output/ and ~/art/workflows/ — ComfyUI has two, so they stay separate
 ```
 
 The path is resolved to an absolute one and stored on the instance, so a later
@@ -327,7 +342,7 @@ Total estimated spend: $0.21
 
 **`kill` when you stop working.** Not `stop`.
 
-For `comfyui` and `jupyter`, check `COMFY_SYNC/` has what you want first — `kill`
+For `comfyui` and `jupyter`, check the sync folder has what you want first — `kill`
 takes the disk with it, and the sync runs on a 60-second cycle.
 
 `stop` releases the GPU but keeps the instance, and vast.ai keeps charging for its
@@ -414,14 +429,14 @@ column in `ps`), while `kill`, `stop`, `log` and the rest take the short local
 
 - `~/.mycodeagent/config.yaml` — API key, HF token, CivitAI token, base port
 - `~/.mycodeagent/mycodeagent.db` — instances and the bad-host list
-- `./COMFY_SYNC/` — created in the working directory while a ComfyUI or Jupyter
+- `./workspace/` — created in the working directory while a ComfyUI or Jupyter
   instance is running, unless `--sync-folder` pointed it somewhere else; see
   [Getting your work back](#getting-your-work-back)
 - `VASTAI_API_KEY` / `HF_TOKEN` override the config file
 
 For a language model, nothing on the rented machine is worth keeping: it's destroyed
 on `kill` and the weights re-download next time. For the other two engines that is
-not true, which is what `COMFY_SYNC` exists for.
+not true, which is what the sync folder exists for.
 
 ## How it works, briefly
 

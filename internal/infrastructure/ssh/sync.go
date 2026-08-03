@@ -143,7 +143,7 @@ func buildSyncScript(sshHost string, sshPort int, dirs []entity.SyncDir, root st
 	var b strings.Builder
 	b.WriteString("while :; do\n")
 	for _, d := range dirs {
-		local := filepath.Join(root, d.Local)
+		local := localDirFor(root, dirs, d)
 
 		fmt.Fprintf(&b, "  REMOTE=$(%s root@%s %s 2>/dev/null | tr -d '\\r' | tail -1)\n",
 			sshCmd, sshHost, shellQuote(remoteResolver(d)))
@@ -171,6 +171,28 @@ func buildSyncScript(sshHost string, sshPort int, dirs []entity.SyncDir, root st
 	}
 	fmt.Fprintf(&b, "  sleep %d\ndone\n", syncIntervalSeconds)
 	return b.String()
+}
+
+// localDirFor is where one SyncDir lands under the chosen root.
+//
+// An engine with a single directory syncs straight into the root, with no
+// subfolder. That is what makes `--sync-folder .` mean what it reads as: point
+// it at a project and the project *is* the workspace. The old behaviour always
+// appended SyncDir.Local, so `--sync-folder .` in a notebook directory created
+// an empty ./workspace/ beside the notebooks and synced that — the files sat one
+// level above the only directory being watched, and nothing moved in either
+// direction. Nothing failed and nothing was logged, which is why it read as a
+// broken sync rather than a misplaced folder.
+//
+// More than one directory keeps the subfolders, because they would otherwise
+// collide: ComfyUI's output/ is pulled down while workflows/ is pushed up, so
+// merging them would upload every generated image into the instance's workflow
+// folder on the next pass.
+func localDirFor(root string, all []entity.SyncDir, d entity.SyncDir) string {
+	if len(all) == 1 {
+		return root
+	}
+	return filepath.Join(root, d.Local)
 }
 
 // remoteResolver renders the shell run on the instance to pick the directory to

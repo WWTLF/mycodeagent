@@ -13,9 +13,11 @@ import (
 // commands and application layers are forbidden from importing infrastructure,
 // where the loop lives.
 //
-// The name predates Jupyter and is kept for instances already syncing into it,
-// though it now covers notebooks as well as ComfyUI output.
-const DefaultSyncRootName = "COMFY_SYNC"
+// It was COMFY_SYNC, from when ComfyUI was the only engine that produced
+// anything. That name shouted an engine at Jupyter users whose notebooks it now
+// holds, so it is "workspace" — which is also what the Jupyter instance calls
+// the directory on its own side.
+const DefaultSyncRootName = "workspace"
 
 type InstanceStatus string
 
@@ -58,8 +60,8 @@ type Instance struct {
 	// SyncRoot is the absolute local directory the loop syncs into, recorded at
 	// deploy time.
 	//
-	// It is persisted rather than recomputed because the root used to be
-	// "<cwd>/COMFY_SYNC", and cwd is a property of whichever shell happened to
+	// It is persisted rather than recomputed because the root defaults to
+	// "<cwd>/workspace", and cwd is a property of whichever shell happened to
 	// run the command. `init` in one directory and `tunnel` in another already
 	// produced two different roots, silently splitting one instance's files
 	// across two places; --sync-folder would have widened that from a directory

@@ -310,7 +310,7 @@ func (s *fakeSSH) StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, 
 	}
 	s.syncStarts++
 	s.syncDirs = dirs
-	return s.syncPID, workDir + "/COMFY_SYNC", nil
+	return s.syncPID, workDir + "/workspace", nil
 }
 
 func (s *fakeSSH) StopSync(pid int) error {

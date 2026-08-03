@@ -119,7 +119,7 @@ type DeployOptions struct {
 	// to be synced back.
 	ProvisioningScript string
 	// SyncFolder overrides the local directory the engine's output is synced
-	// into. Empty keeps the default, <cwd>/COMFY_SYNC. Applies to any engine
+	// into. Empty keeps the default, <cwd>/workspace. Applies to any engine
 	// that declares SyncDirs — notebooks and ComfyUI output alike.
 	SyncFolder string
 }

@@ -35,8 +35,9 @@ func TestPullOnlyDirSyncsDownOnly(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("want 1 rsync for a pull-only dir, got %d:\n%s", len(lines), script)
 	}
-	// Destination last: remote source, local destination.
-	if !strings.Contains(lines[0], `root@h:"$REMOTE"/ '/tmp/root/output'/`) {
+	// Destination last: remote source, local destination. A lone SyncDir syncs
+	// into the root itself — see TestSingleDirEngineSyncsIntoTheRootItself.
+	if !strings.Contains(lines[0], `root@h:"$REMOTE"/ '/tmp/root'/`) {
 		t.Errorf("pull-only rsync does not run remote → local: %s", lines[0])
 	}
 	// --update would mean a file whose local mtime happens to be ahead is never
@@ -66,10 +67,10 @@ func TestPushDirSyncsBothWays(t *testing.T) {
 
 	up, down := lines[0], lines[1]
 	// Up first, so a fresh instance is seeded before anything is pulled back.
-	if !strings.Contains(up, `'/tmp/root/workflows'/ root@h:"$REMOTE"/`) {
+	if !strings.Contains(up, `'/tmp/root'/ root@h:"$REMOTE"/`) {
 		t.Errorf("first rsync is not local → remote: %s", up)
 	}
-	if !strings.Contains(down, `root@h:"$REMOTE"/ '/tmp/root/workflows'/`) {
+	if !strings.Contains(down, `root@h:"$REMOTE"/ '/tmp/root'/`) {
 		t.Errorf("second rsync is not remote → local: %s", down)
 	}
 	for _, l := range lines {
@@ -295,8 +296,8 @@ func TestResolveSyncRootExpandsTilde(t *testing.T) {
 }
 
 // An absolute --sync-folder is used as given: it is the root itself, not a
-// parent to create COMFY_SYNC inside. Nesting would make the flag's own value
-// not the directory the files appear in.
+// parent to create the default folder inside. Nesting would make the flag's
+// own value not the directory the files appear in.
 func TestResolveSyncRootUsesAnAbsoluteFolderAsTheRoot(t *testing.T) {
 	got, err := ResolveSyncRoot("/tmp/nb")
 	if err != nil {
@@ -304,5 +305,83 @@ func TestResolveSyncRootUsesAnAbsoluteFolderAsTheRoot(t *testing.T) {
 	}
 	if got != "/tmp/nb" {
 		t.Errorf("ResolveSyncRoot(\"/tmp/nb\") = %q, want /tmp/nb", got)
+	}
+}
+
+// The bug this exists for, in the form it was hit: `--sync-folder .` in a
+// directory full of notebooks. The root was the project, but SyncDir.Local was
+// appended unconditionally, so the loop watched ./workspace/ — an empty folder
+// created beside the notebooks. The files sat one level above the only directory
+// being synced, so nothing moved in either direction, and nothing failed or was
+// logged. It reads as a broken sync rather than a misplaced folder.
+//
+// An engine with a single directory therefore syncs into the root itself.
+func TestSingleDirEngineSyncsIntoTheRootItself(t *testing.T) {
+	dirs := []entity.SyncDir{{
+		RemoteCandidates: []string{"/workspace"},
+		Local:            "workspace",
+		Push:             true,
+	}}
+	script := buildSyncScript("h", 22, dirs, "/home/me/project")
+
+	for _, l := range rsyncLines(script) {
+		if !strings.Contains(l, `'/home/me/project'/`) {
+			t.Errorf("rsync does not use the root itself: %s", l)
+		}
+		if strings.Contains(l, "/home/me/project/workspace") {
+			t.Errorf("rsync still appends the subfolder: %s", l)
+		}
+	}
+}
+
+// The other half of the rule, and the reason it is conditional rather than
+// absolute. ComfyUI pulls output/ down and pushes workflows/ up; merged into one
+// directory, the push leg would upload every generated image into the instance's
+// workflow folder on the next pass.
+func TestMultiDirEngineKeepsItsSubfolders(t *testing.T) {
+	dirs := []entity.SyncDir{
+		{RemoteCandidates: []string{"/app/output"}, Local: "output"},
+		{RemoteCandidates: []string{"/app/wf"}, Local: "workflows", Push: true, RootMarker: "main.py"},
+	}
+	script := buildSyncScript("h", 22, dirs, "/home/me/project")
+
+	for _, want := range []string{"/home/me/project/output", "/home/me/project/workflows"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script does not sync into %s:\n%s", want, script)
+		}
+	}
+	// Neither leg may target the bare root, or the two directories become one.
+	for _, l := range rsyncLines(script) {
+		if strings.Contains(l, `'/home/me/project'/`) {
+			t.Errorf("a multi-dir engine collapsed into the root: %s", l)
+		}
+	}
+}
+
+// The default root is the flag's default too, so they cannot drift apart.
+func TestDefaultSyncRootIsWorkspaceUnderCwd(t *testing.T) {
+	if entity.DefaultSyncRootName != "workspace" {
+		t.Errorf("default root name is %q, want \"workspace\"", entity.DefaultSyncRootName)
+	}
+	got, err := ResolveSyncRoot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if want := filepath.Join(wd, "workspace"); got != want {
+		t.Errorf("ResolveSyncRoot(\"\") = %q, want %q", got, want)
+	}
+}
+
+// "." is an ordinary relative path and must resolve to the working directory
+// itself — the case the flag is most often typed with.
+func TestResolveSyncRootAcceptsDot(t *testing.T) {
+	got, err := ResolveSyncRoot(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if got != wd {
+		t.Errorf("ResolveSyncRoot(\".\") = %q, want the working directory %q", got, wd)
 	}
 }

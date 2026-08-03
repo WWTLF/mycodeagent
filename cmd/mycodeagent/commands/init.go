@@ -16,9 +16,16 @@ const syncFolderHelp = `--sync-folder chooses the local directory the instance's
 Instances are disposable, so anything an engine writes — notebooks for Jupyter,
 generated images and workflows for ComfyUI — is copied here every 60s and would
 otherwise die with the machine. The default is ./` + entity.DefaultSyncRootName + ` in the
-directory init runs from, which is awkward when that is a source repository.
+directory init runs from.
 
   --sync-folder ~/notebooks
+  --sync-folder .            the current directory itself
+
+The path is used as given. An engine with one synced directory — Jupyter, whose
+/workspace holds the notebooks — syncs into it directly, so pointing the flag at
+a project makes that project the workspace. ComfyUI has two (output/ and
+workflows/) and keeps them as subfolders, because merging them would upload every
+generated image into the instance's workflow folder.
 
 The path is resolved to an absolute one and stored on the instance, so a later
 'tunnel' or 'start' run from anywhere else still syncs to the same place.

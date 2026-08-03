@@ -2,6 +2,8 @@
 *.db
 /dist/
 
-# Created in the working directory by the rsync loop `init`/`tunnel` start for
-# ComfyUI — generated images and saved workflows pulled off the instance.
+# Created in the working directory by the rsync loop `init`/`tunnel` start —
+# notebooks for Jupyter, generated images and workflows for ComfyUI. The old
+# COMFY_SYNC name is kept so existing checkouts stay clean.
+/workspace/
 /COMFY_SYNC/

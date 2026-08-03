@@ -13,10 +13,13 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # Supporting it means splitting those two calls into build-tagged files.
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build run test check clean release checksums
+.PHONY: build run test check install clean release checksums
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(APP_NAME) $(CMD)
+
+install:
+	go install $(CMD)
 
 run:
 	go run $(CMD)
