@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -95,7 +94,12 @@ type SSHTunnelProvider interface {
 	StopTunnel(pid int) error
 	// StartSync launches the background rsync loop for an engine's output
 	// directories and returns its pid (0 when the engine produces nothing).
-	StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, workDir string) (pid int, root string, err error)
+	//
+	// syncRoot is the local directory to sync into; "" means the provider's
+	// default. It also returns the absolute root it settled on, which the caller
+	// persists so later commands reuse it rather than re-deriving one from
+	// whatever directory they happen to run in.
+	StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, syncRoot string) (pid int, root string, err error)
 	StopSync(pid int) error
 	WaitForSSH(ctx context.Context, host string, port int) error
 	RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error)
@@ -114,6 +118,10 @@ type DeployOptions struct {
 	// HuggingFace or CivitAI onto a disposable instance, so nothing large has
 	// to be synced back.
 	ProvisioningScript string
+	// SyncFolder overrides the local directory the engine's output is synced
+	// into. Empty keeps the default, <cwd>/COMFY_SYNC. Applies to any engine
+	// that declares SyncDirs — notebooks and ComfyUI output alike.
+	SyncFolder string
 }
 
 type OfferResult struct {
@@ -521,7 +529,7 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, opts Deplo
 
 	// Only now: a sync started earlier would have copied from an instance that
 	// might still be torn down, and would have to be stopped again on failure.
-	s.startSync(inst, model)
+	s.startSync(inst, model, opts.SyncFolder)
 
 	announceEndpoint(model, localPort)
 	return inst, nil
@@ -674,23 +682,22 @@ func (r *downloadReporter) report(out []byte) {
 // startSync launches the background rsync loop and records its pid, if the
 // engine produces anything worth keeping. Never fatal: the deploy has already
 // succeeded, and losing the sync is worth a warning, not a teardown.
-func (s *DeployService) startSync(inst *entity.Instance, model *entity.Model) {
+func (s *DeployService) startSync(inst *entity.Instance, model *entity.Model, syncFolder string) {
 	dirs := s.engine.SyncDirs(model)
 	if len(dirs) == 0 {
 		return
 	}
-	wd, err := os.Getwd()
-	if err != nil {
-		fmt.Printf("Warning: cannot resolve working directory for sync: %v\n", err)
-		return
-	}
-	pid, root, err := s.ssh.StartSync(inst.SSHHost, inst.SSHPort, dirs, wd)
+	pid, root, err := s.ssh.StartSync(inst.SSHHost, inst.SSHPort, dirs, syncFolder)
 	if err != nil {
 		fmt.Printf("Warning: output sync not started: %v\n", err)
 		fmt.Printf("         Copy manually before `kill`, or the work is lost.\n")
 		return
 	}
 	inst.SyncPID = pid
+	// Record the root the provider actually used, not the flag: `tunnel` and
+	// `start` run from wherever the user happens to be, and re-deriving it there
+	// would split one instance's files across two directories.
+	inst.SyncRoot = root
 	if err := s.instances.Update(inst); err != nil {
 		fmt.Printf("Warning: sync started (pid %d) but not recorded: %v\n", pid, err)
 	}

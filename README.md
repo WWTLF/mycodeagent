@@ -38,14 +38,15 @@ Or grab a binary from [Releases](https://github.com/WWTLF/mycodeagent/releases) 
 Linux and macOS, amd64 and arm64:
 
 ```bash
-tar xzf mycodeagent_v0.1.0_linux_amd64.tar.gz
-sudo mv mycodeagent_v0.1.0_linux_amd64 /usr/local/bin/mycodeagent
+tar xzf mycodeagent_v0.2.0_linux_amd64.tar.gz
+sudo mv mycodeagent_v0.2.0_linux_amd64 /usr/local/bin/mycodeagent
 ```
 
 Windows is not built yet: the tunnel uses `Setpgid` and `syscall.Kill`, which don't
 exist there. Two functions need build-tagged variants; nothing else is Unix-specific.
 
-You also need an `ssh` client on `PATH` and an SSH keypair in `~/.ssh`.
+You also need an `ssh` client on `PATH` and an SSH keypair in `~/.ssh`. `rsync` is
+needed too if you use ComfyUI or Jupyter — it is what copies your work back.
 
 ## First run
 
@@ -63,20 +64,21 @@ Then check what's on offer:
 
 ```bash
 $ mycodeagent models
-ALIAS       NAME                        GPUs     CTX   R  V  T  $/HR    GGUF REPO                     QUANT
-comfyui     comfyui                     1x 48GB  -     -  -  -  $0.389                                -
-jupyter     jupyter-pytorch             1x 32GB  -     -  -  -  $0.295                                -
-coder-mini  qwen35-9b                   1x 16GB  64K   +  -  +  $0.063  unsloth/Qwen3.5-9B-GGUF       UD-Q5_K_XL
-coder       qwen36-27b-24g              1x 24GB  32K   +  -  +  $0.116  unsloth/Qwen3.6-27B-GGUF      IQ4_XS
-coder-fast  qwen36-35b-a3b              1x 24GB  64K   +  -  +  $0.150  unsloth/Qwen3.6-35B-A3B-GGUF  UD-IQ4_XS
-coder-hq    qwen36-27b-32g              1x 32GB  64K   +  -  +  $0.290  unsloth/Qwen3.6-27B-GGUF      Q5_K_M
-coder-max   qwen36-27b-48g              1x 48GB  128K  +  -  +  $0.389  unsloth/Qwen3.6-27B-GGUF      UD-Q6_K_XL
-rude        qwen36-35b-a3b-abliterated  1x 32GB  128K  +  -  +  $0.295  mradermacher/Huihui-…         Q4_K_M
+ALIAS         NAME                        GPUs     CTX   R  V  T  $/HR    GGUF REPO                     QUANT
+comfyui       comfyui                     1x 48GB  -     -  -  -  $0.402                                -
+jupyter       jupyter-pytorch             1x 32GB  -     -  -  -  $0.202                                -
+jupyter-mini  jupyter-pytorch-16g         1x 16GB  -     -  -  -  $0.072                                -
+coder-mini    qwen35-9b                   1x 16GB  64K   +  -  +  $0.067  unsloth/Qwen3.5-9B-GGUF       UD-Q5_K_XL
+coder         qwen36-27b-24g              1x 24GB  32K   +  -  +  $0.116  unsloth/Qwen3.6-27B-GGUF      IQ4_XS
+coder-fast    qwen36-35b-a3b              1x 24GB  64K   +  -  +  $0.116  unsloth/Qwen3.6-35B-A3B-GGUF  UD-IQ4_XS
+coder-hq      qwen36-27b-32g              1x 32GB  64K   +  -  +  $0.202  unsloth/Qwen3.6-27B-GGUF      Q5_K_M
+coder-max     qwen36-27b-48g              1x 48GB  128K  +  -  +  $0.402  unsloth/Qwen3.6-27B-GGUF      UD-Q6_K_XL
+rude          qwen36-35b-a3b-abliterated  1x 32GB  128K  +  -  +  $0.202  mradermacher/Huihui-…         Q4_K_M
 ```
 
 `R`/`V`/`T` are reasoning, vision, tool-calling. Prices are live — the cheapest
 matching offer at that moment, so they move around; the numbers above were real when
-this was written. The top two aren't language models, so most columns don't apply.
+this was written. The top three aren't language models, so most columns don't apply.
 
 ## Which model
 
@@ -89,7 +91,8 @@ this was written. The top two aren't language models, so most columns don't appl
 | `coder-max` | Best quality this tool offers. 27B at ~6.5 bits, 128k window. |
 | `rude` | Uncensored. Fast MoE, 128k window. |
 | `comfyui` | Not a language model — image generation. |
-| `jupyter` | Not a language model — a GPU notebook. |
+| `jupyter` | Not a language model — a GPU notebook. 32 GB. |
+| `jupyter-mini` | The same notebook on the cheapest card. 16 GB — enough for a 7B in 4-bit, a small fine-tune, or ordinary dataframe work. |
 
 The short version: **`coder` unless you have a reason.** `coder-max` if quality
 matters more than $0.28/hr. `coder-fast` only if you're impatient — it's a mixture-of-
@@ -168,8 +171,9 @@ billing — what changes is that you open a web UI instead of pointing a client 
 API.
 
 ```bash
-mycodeagent init comfyui     # ~$0.39/hr, 48 GB card
-mycodeagent init jupyter     # ~$0.30/hr, 32 GB card
+mycodeagent init comfyui      # ~$0.39/hr, 48 GB card
+mycodeagent init jupyter      # ~$0.30/hr, 32 GB card
+mycodeagent init jupyter-mini # ~$0.07/hr, 16 GB card
 ```
 
 Both open in a browser at the URL `mycodeagent ps` prints — `http://localhost:8000`
@@ -194,10 +198,10 @@ Syncing output + workflows to /home/you/project/COMFY_SYNC every 60s
 |---|---|---|
 | `COMFY_SYNC/output` | down only | Generated images. The instance is their only author. |
 | `COMFY_SYNC/workflows` | **both ways** | Workflows are source files. Edit them locally and they reach the instance; save one in the UI and it lands here. |
-| `COMFY_SYNC/workspace` | down only | Jupyter's `/workspace` — notebooks and data. |
+| `COMFY_SYNC/workspace` | **both ways** | Jupyter's `/workspace` — notebooks and data. Notebooks are source files too: they survive the instance and seed the next one. |
 
-Two-way means your workflows survive the instance and seed the next one: `init`
-uploads what's already in `COMFY_SYNC/workflows` before pulling anything down.
+Two-way means your work survives the instance and seeds the next one: `init`
+uploads what's already there before pulling anything down.
 
 Nothing is ever deleted, in either direction — a stale local copy must not be able
 to erase work on the instance, and vice versa. The cost is that deleting a file on
@@ -209,6 +213,21 @@ Models are **not** synced back. They're tens of gigabytes and came from the inte
 in the first place — re-fetching costs less than uploading over a home connection.
 
 If the tunnel dies, `mycodeagent tunnel <vastai_id>` restarts the sync along with it.
+
+**Choosing where it lands.** `COMFY_SYNC/` in the working directory is awkward when
+that directory is a source repository. `--sync-folder` picks somewhere else:
+
+```bash
+mycodeagent init jupyter --sync-folder ~/notebooks
+# notebooks appear in ~/notebooks/workspace/
+```
+
+The path is resolved to an absolute one and stored on the instance, so a later
+`tunnel` or `start` run from a different directory still syncs to the same place —
+without it, the root was re-derived from whatever directory you happened to be in,
+and one instance's files could end up split across two.
+
+Engines that write nothing ignore the flag; the language models never sync.
 
 ### Getting models onto a ComfyUI instance
 
@@ -365,7 +384,7 @@ normal — `init` reports progress separately.
 |---|---|
 | `login` | Store the vast.ai key + HF token, upload your SSH key |
 | `models` | Catalog with live pricing |
-| `init <model>` | Rent, start, tunnel. `--country`, `--provisioning`, `--create-instance-only` |
+| `init <model>` | Rent, start, tunnel. `--country`, `--provisioning`, `--sync-folder`, `--create-instance-only` |
 | `ps` | List instances with health |
 | `config` | Write running instances into opencode's config |
 | `kill <id>` | Destroy. The normal way to finish. |
@@ -384,7 +403,8 @@ normal — `init` reports progress separately.
 - `~/.mycodeagent/config.yaml` — API key, HF token, CivitAI token, base port
 - `~/.mycodeagent/mycodeagent.db` — instances and the bad-host list
 - `./COMFY_SYNC/` — created in the working directory while a ComfyUI or Jupyter
-  instance is running; see [Getting your work back](#getting-your-work-back)
+  instance is running, unless `--sync-folder` pointed it somewhere else; see
+  [Getting your work back](#getting-your-work-back)
 - `VASTAI_API_KEY` / `HF_TOKEN` override the config file
 
 For a language model, nothing on the rented machine is worth keeping: it's destroyed

@@ -11,10 +11,44 @@ import (
 	"github.com/WWTLF/mycodeagent/internal/domain/entity"
 )
 
-// SyncRootName is the directory created in the working directory. Fixed rather
-// than configurable so a user who ran `init` in one shell and `tunnel` in
-// another still lands on the same place.
-const SyncRootName = "COMFY_SYNC"
+// SyncRootName is the directory created in the working directory when no
+// explicit root is chosen. Defined in the domain so the command and application
+// layers can name it without importing this package.
+const SyncRootName = entity.DefaultSyncRootName
+
+// ResolveSyncRoot turns a user-supplied --sync-folder into the absolute
+// directory the loop will use, falling back to <cwd>/COMFY_SYNC.
+//
+// Absolute is the whole point. The root is stored on the instance and reused by
+// `tunnel` and `start`, which routinely run from a different directory than
+// `init` did; keeping a relative path would resolve it against whichever shell
+// ran the later command and quietly sync into a second location. "~" is expanded
+// here too — the flag is often typed unquoted, but not always, and a literal
+// "~" directory in cwd is never what was meant.
+func ResolveSyncRoot(folder string) (string, error) {
+	if strings.TrimSpace(folder) == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve working directory for sync: %w", err)
+		}
+		return filepath.Join(wd, SyncRootName), nil
+	}
+
+	folder = strings.TrimSpace(folder)
+	if folder == "~" || strings.HasPrefix(folder, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand %q: %w", folder, err)
+		}
+		folder = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(folder, "~"), "/"))
+	}
+
+	abs, err := filepath.Abs(folder)
+	if err != nil {
+		return "", fmt.Errorf("resolve %q: %w", folder, err)
+	}
+	return abs, nil
+}
 
 // syncIntervalSeconds is how long the loop sleeps between passes. rsync only
 // transfers what changed, so a short interval is cheap; the cost of a long one
@@ -32,7 +66,10 @@ const syncIntervalSeconds = 60
 //
 // A detached process rather than a goroutine, for the same reason the tunnel is
 // one: the CLI exits after `init` and the sync has to outlive it.
-func StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, workDir string) (pid int, root string, err error) {
+//
+// syncRoot is the directory to sync into, "" for the default. It is returned
+// resolved so the caller can persist the choice rather than re-deriving it.
+func StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, syncRoot string) (pid int, root string, err error) {
 	if len(dirs) == 0 {
 		return 0, "", nil // engine produces nothing worth keeping
 	}
@@ -40,7 +77,10 @@ func StartSync(sshHost string, sshPort int, dirs []entity.SyncDir, workDir strin
 		return 0, "", fmt.Errorf("rsync not found on PATH: %w", err)
 	}
 
-	root = filepath.Join(workDir, SyncRootName)
+	root, err = ResolveSyncRoot(syncRoot)
+	if err != nil {
+		return 0, "", err
+	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return 0, "", fmt.Errorf("create %s: %w", root, err)
 	}

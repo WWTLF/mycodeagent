@@ -112,6 +112,34 @@ var defaultModels = []*entity.Model{
 		Vision:         false,
 		ToolCalling:    false,
 	},
+	{
+		// 16 GB Jupyter + PyTorch — the same image on the cheapest tier the price
+		// ladder has (~$0.069/hr against ~$0.202/hr at 32 GB, per docs/Solution.md).
+		//
+		// Only the card differs. Nothing about a notebook is sized by VRAM the way
+		// a GGUF is: there are no weights to fit, so DiskGB and StartupTimeout stay
+		// at the 32 GB values — both are set by the PyTorch image, which is
+		// identical here. Shrinking either would only make this entry fail on hosts
+		// where the 32 GB one succeeds.
+		//
+		// 16 GB is enough for fine-tuning a small model, inference on a 7B in
+		// 4-bit, or ordinary dataframe/sklearn work. Reach for `jupyter` when a
+		// batch or a model does not fit.
+		Name:           "jupyter-pytorch-16g",
+		Alias:          "jupyter-mini",
+		Category:       entity.CategoryDataScience,
+		EngineType:     entity.EngineJupyter,
+		VRAM:           16,
+		NumGPUs:        1,
+		DiskGB:         40,
+		DownloadGB:     0,
+		StartupTimeout: 15 * time.Minute,
+		ServerPort:     8888,
+		HealthPath:     "/",
+		Reasoning:      false,
+		Vision:         false,
+		ToolCalling:    false,
+	},
 	// --- Coding (llama.cpp) ---
 	{
 		// 16 GB. Dense 9B is the largest dense model that fits with real context;
