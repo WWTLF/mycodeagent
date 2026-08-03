@@ -398,6 +398,12 @@ normal — `init` reports progress separately.
 
 `-v` on any command logs every vast.ai API request and response.
 
+Every flag, its purpose and worked examples: **[docs/Commands.md](docs/Commands.md)**.
+
+One trap worth knowing here: `tunnel` takes the **vast.ai** ID (the `VAST ID`
+column in `ps`), while `kill`, `stop`, `log` and the rest take the short local
+`ID`.
+
 ## State on your machine
 
 - `~/.mycodeagent/config.yaml` — API key, HF token, CivitAI token, base port

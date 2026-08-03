@@ -1019,7 +1019,7 @@ func (s *DeployService) Restart(ctx context.Context, id int64) error {
 		return fmt.Errorf("start server: %w", err)
 	}
 
-	fmt.Println("Restart initiated. Use 'mycodeagent log -f' to monitor.")
+	fmt.Printf("Restart initiated. Use 'mycodeagent log %d' to monitor.\n", inst.ID)
 	return nil
 }
 
