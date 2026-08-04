@@ -24,7 +24,18 @@ const (
 	jupyterLogPath    = "/tmp/lab.log"
 
 	// jupyterWorkDir is the directory JupyterLab serves as its file-browser root,
-	// and the one SyncDirs pulls back.
+	// the one the script chdir's into before launching, and the one SyncDirs
+	// pulls back.
+	//
+	// The chdir is not redundant with --ServerApp.root_dir. root_dir only moves
+	// the file browser; the server process keeps the shell's directory, /root,
+	// and a kernel that resolves its cwd from the process rather than from the
+	// notebook's path inherits it. Relative paths in a notebook then point at
+	// /root: `Path("data/books").glob("*.txt")` yields nothing, and a corpus
+	// loader reading it produces an empty corpus with no error at all — the
+	// failure only surfaces much later, as a KeyError deep inside a tokenizer.
+	// Observed on a live instance: 35 files present under /workspace/data/books,
+	// the notebook counted 0 tokens.
 	//
 	// It has to be set explicitly. Left alone, JupyterLab serves its working
 	// directory, which under `runtype: "ssh"` is /root — so every notebook the
@@ -85,6 +96,7 @@ echo "Jupyter+PyTorch instance starting (GPUs: %d)" > %s
 if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi >> %s 2>&1 || true; fi
 
 mkdir -p %s
+cd %s
 
 if curl -sf http://localhost:%d/ >/dev/null 2>&1; then
     echo "JupyterLab already serving on %d" >> %s
@@ -112,7 +124,7 @@ done
 echo "FATAL: JupyterLab did not answer on %d within 120s" >> %s
 exit 1`,
 		numGPUs, jupyterLogPath, jupyterLogPath,
-		jupyterWorkDir,
+		jupyterWorkDir, jupyterWorkDir,
 		jupyterServerPort, jupyterServerPort, jupyterLogPath,
 		jupyterLogPath, jupyterLogPath,
 		jupyterServerPort, jupyterWorkDir, jupyterLogPath,

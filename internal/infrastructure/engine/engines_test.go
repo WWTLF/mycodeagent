@@ -454,3 +454,37 @@ func TestJupyterNotebooksSyncBothWays(t *testing.T) {
 		t.Error("notebook directory is pull-only: local notebooks never reach a fresh instance")
 	}
 }
+
+// The engine must chdir into the directory it serves before launching the
+// server, not merely point --ServerApp.root_dir at it.
+//
+// root_dir moves only the file browser. The server process keeps the shell's
+// working directory — /root under runtype "ssh" — and a kernel resolving its
+// cwd from the process inherits it. Relative paths inside a notebook then aim
+// at /root, so `Path("data/books").glob("*.txt")` returns nothing and a loader
+// built on it yields an empty corpus *without raising*: the defect surfaces
+// later and elsewhere, as a KeyError inside a tokenizer, with nothing pointing
+// back at the working directory. Seen live: 35 files under /workspace/data/books,
+// notebook reported 0 tokens.
+//
+// Asserting order — the chdir has to precede the launch, or it changes nothing.
+func TestJupyterChdirsIntoItsWorkDirBeforeLaunch(t *testing.T) {
+	engine := NewJupyterEngine()
+	model := &entity.Model{Name: "j", EngineType: entity.EngineJupyter}
+	script := engine.BuildOnstart(model, 1, 0, "")
+
+	workDir := engine.SyncDirs(model)[0].RemoteCandidates[0]
+
+	chdir := strings.Index(script, "cd "+workDir)
+	if chdir < 0 {
+		t.Fatalf("script never chdirs into %s; a kernel would inherit /root:\n%s", workDir, script)
+	}
+	launch := strings.Index(script, "lab --ip=")
+	if launch < 0 {
+		t.Fatal("script does not launch jupyter lab")
+	}
+	if chdir > launch {
+		t.Errorf("chdir into %s comes after the launch (%d > %d): the server still starts in the shell's directory",
+			workDir, chdir, launch)
+	}
+}
