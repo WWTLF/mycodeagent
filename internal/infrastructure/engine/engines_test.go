@@ -488,3 +488,33 @@ func TestJupyterChdirsIntoItsWorkDirBeforeLaunch(t *testing.T) {
 			workDir, chdir, launch)
 	}
 }
+
+// The start-script name each engine writes is what identifies it to
+// detectModelFromOnstart, which lives in the domain and cannot import this
+// package. That leaves the two halves free to drift: renaming a script here
+// would silently make every instance of that engine undetectable, and the only
+// symptom would be a wrong label in `ps` long afterwards.
+//
+// This pins them together. The literals below are the ones onstartScriptMarker
+// looks for; if a script is renamed, this fails first.
+func TestOnstartMarkersMatchTheEngineScripts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		engine interface {
+			BuildOnstart(*entity.Model, int, int, string) string
+		}
+		model  *entity.Model
+		marker string
+	}{
+		{"jupyter", NewJupyterEngine(), &entity.Model{Name: "j", EngineType: entity.EngineJupyter}, "start_lab.sh"},
+		{"comfyui", NewComfyUIEngine(), &entity.Model{Name: "c", EngineType: entity.EngineComfyUI}, "start_cui.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := tc.engine.BuildOnstart(tc.model, 1, 0, "")
+			if !strings.Contains(script, tc.marker) {
+				t.Errorf("onstart does not contain %q — detectModelFromOnstart looks for exactly that:\n%s",
+					tc.marker, script)
+			}
+		})
+	}
+}
