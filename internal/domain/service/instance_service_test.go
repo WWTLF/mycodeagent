@@ -317,3 +317,35 @@ func TestDeployAnnouncesTheRightEndpointPerEngine(t *testing.T) {
 		})
 	}
 }
+
+// A catalog entry without an HFRepo must not claim every instance.
+//
+// strings.Contains(s, "") is true for every s. ComfyUI and both Jupyter entries
+// carry no repo, and ComfyUI leads the catalog, so the original loop returned
+// "comfyui" for every onstart it was ever handed. Live symptom: a deploy that
+// had selected a 32 GB card and was pulling vastai/pytorch — the Jupyter spec —
+// listed as ALIAS comfyui, MODEL comfyui.
+func TestDetectModelIgnoresCatalogEntriesWithNoRepo(t *testing.T) {
+	catalog := []*entity.Model{
+		{Name: "comfyui", EngineType: entity.EngineComfyUI},
+		{Name: "jupyter-pytorch", EngineType: entity.EngineJupyter},
+		{Name: "qwen", EngineType: entity.EngineLlamaCpp, HFRepo: "unsloth/Qwen3.6-27B-GGUF"},
+	}
+
+	for _, tc := range []struct {
+		name    string
+		onstart string
+		want    string
+	}{
+		{"jupyter by its start script", "echo x > /tmp/start_lab.sh && bash /tmp/start_lab.sh", "jupyter-pytorch"},
+		{"comfyui by its start script", "echo x > /tmp/start_cui.sh && bash /tmp/start_cui.sh", "comfyui"},
+		{"llama by repo", "llama-server -hf unsloth/Qwen3.6-27B-GGUF:IQ4_XS", "qwen"},
+		{"nothing recognisable", "sleep infinity", "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := detectModelFromOnstart(tc.onstart, catalog); got != tc.want {
+				t.Errorf("detectModelFromOnstart() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

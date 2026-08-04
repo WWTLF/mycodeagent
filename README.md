@@ -230,6 +230,15 @@ alone rather than overwritten.
 Models are **not** synced back. They're tens of gigabytes and came from the internet
 in the first place — re-fetching costs less than uploading over a home connection.
 
+**Build junk is skipped in both directions** — `.venv`/`venv`/`.env`, `__pycache__`,
+`.git`, `node_modules`, `.ipynb_checkpoints` and the usual tool caches. Point
+`--sync-folder` at a Python project and its virtualenv is the largest thing in it
+by an order of magnitude — a CUDA PyTorch venv is around 5 GB against 100 MB of
+actual work — and rsync copies in directory order, so it goes first and the data
+your notebooks read is still in flight ten minutes later. It is useless on arrival
+anyway: the instance has its own interpreter, and a venv built on your machine has
+your machine's paths baked into it.
+
 If the tunnel dies, `mycodeagent tunnel <vastai_id>` restarts the sync along with it.
 
 **Choosing where it lands.** `workspace/` in the working directory is awkward when

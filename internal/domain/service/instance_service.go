@@ -480,12 +480,54 @@ func (s *InstanceService) Sync(ctx context.Context) ([]*entity.Instance, error) 
 	return s.instances.FindAll()
 }
 
-// detectModelFromOnstart matches the onstart script against the static catalog
-// by HFRepo, falling back to parsing the "-hf <repo>[:quant]" reference for
-// models that are not (or no longer) in the catalog. Pure helper, no I/O.
+// onstartScriptMarker is the start-script filename an engine writes into its
+// onstart, and the only thing in that script identifying the engine when there
+// is no model repo to match on.
+//
+// The names mirror the engine implementations, which this package must not
+// import (domain does not depend on infrastructure).
+// TestOnstartMarkersMatchTheEngineScripts, in the engine package, asserts each
+// engine's onstart actually contains the marker named here, so the two cannot
+// drift apart silently.
+func onstartScriptMarker(e entity.EngineType) string {
+	switch e {
+	case entity.EngineJupyter:
+		return "start_lab.sh"
+	case entity.EngineComfyUI:
+		return "start_cui.sh"
+	case entity.EngineLlamaCpp:
+		return "start_llama.sh"
+	}
+	return ""
+}
+
+// detectModelFromOnstart identifies the model an already-running instance is
+// serving, for instances that exist on vast.ai but not in the local database.
+//
+// Matching is by HFRepo first, then by the engine's start-script name, then by
+// the "-hf <repo>[:quant]" reference. Pure helper, no I/O.
+//
+// The empty-HFRepo guard is the whole point of the first loop's shape:
+// strings.Contains(s, "") is true for every s, so a catalog entry with no repo
+// matches every onstart ever written. ComfyUI and both Jupyter entries have no
+// repo, and ComfyUI is first in the catalog — so every instance, whatever it
+// was actually running, came back labelled "comfyui". Observed live: a deploy
+// that had selected a 32 GB card and was pulling vastai/pytorch — indisputably
+// the Jupyter spec — listed as ALIAS comfyui, MODEL comfyui.
+//
+// Models sharing an engine (jupyter-pytorch and jupyter-pytorch-16g) write
+// identical scripts and cannot be told apart here; the first match wins. That
+// is a wrong VRAM figure in `ps`, not a wrong engine, and the instance created
+// through this CLI carries the exact name from its deploy anyway.
 func detectModelFromOnstart(onstart string, models []*entity.Model) string {
 	for _, m := range models {
-		if strings.Contains(onstart, m.HFRepo) {
+		if m.HFRepo != "" && strings.Contains(onstart, m.HFRepo) {
+			return m.Name
+		}
+	}
+	for _, m := range models {
+		if marker := onstartScriptMarker(m.EngineType); marker != "" &&
+			strings.Contains(onstart, marker) {
 			return m.Name
 		}
 	}
