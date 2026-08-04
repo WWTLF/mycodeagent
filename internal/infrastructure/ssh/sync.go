@@ -120,6 +120,41 @@ func StopSync(pid int) error {
 	return nil
 }
 
+// syncExcluded are directories and files that must never cross the wire.
+//
+// `--sync-folder .` is documented as pointing at a project, and a Python project
+// carries its virtualenv: this repository's .venv holds a CUDA build of PyTorch
+// and weighs 4.8 GB against 100 MB of actual work. rsync copies in directory
+// order, so the venv went first and the data the notebooks need had still not
+// arrived eight minutes in — the kernel raised FileNotFoundError on a data
+// directory that existed but was empty, and looked for all the world like a
+// broken path.
+//
+// Sending it is pure waste besides: the image ships its own interpreter at
+// /venv/main, and a Linux venv built elsewhere would not run anyway — the paths
+// baked into its scripts point at the local machine.
+//
+// Everything here is either rebuildable from what does get synced or specific
+// to one machine.
+var syncExcluded = []string{
+	".venv", "venv", "env", "ENV", ".env",
+	"__pycache__", "*.pyc", "*.pyo",
+	".git",
+	"node_modules",
+	".ipynb_checkpoints",
+	".mypy_cache", ".pytest_cache", ".ruff_cache",
+	".DS_Store",
+}
+
+// syncExcludeFlags renders syncExcluded as rsync arguments.
+func syncExcludeFlags() string {
+	parts := make([]string, 0, len(syncExcluded))
+	for _, e := range syncExcluded {
+		parts = append(parts, "--exclude="+shellQuote(e))
+	}
+	return strings.Join(parts, " ")
+}
+
 // buildSyncScript renders the loop.
 //
 // Remote paths are resolved on every pass rather than once at start: the
@@ -152,7 +187,7 @@ func buildSyncScript(sshHost string, sshPort int, dirs []entity.SyncDir, root st
 		// copy. It is confined to two-way directories: for a pull-only one the
 		// remote is the sole author, and skipping a file because the local mtime
 		// happens to be ahead would mean never pulling it.
-		flags := "-az --partial"
+		flags := "-az --partial " + syncExcludeFlags()
 		if d.Push {
 			flags += " --update"
 		}

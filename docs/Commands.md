@@ -156,14 +156,14 @@ a broken `init` never leaves a paid GPU running. Ctrl-C does the same.
 | Flag | Default | Purpose |
 |---|---|---|
 | `--country <codes>` | anywhere | Restrict the offer search to ISO-3166 alpha-2 codes, comma-separated: `--country RO,DE`. The search sorts purely by price, which is how three deploys in a row can land in a region whose route to HuggingFace runs at ~1 MB/s. Codes are validated first — vast.ai answers an unknown code with an empty result set that is indistinguishable from "your filters are too tight". |
-| `--sync-folder <path>` | `./workspace` | Where the instance's files are kept locally. Used as given: a one-directory engine (Jupyter) syncs into it directly, ComfyUI keeps `output/` and `workflows/` under it. Resolved to an absolute path and stored on the instance, so a later `tunnel` or `start` from a different directory syncs to the same place. Ignored by engines that write nothing. |
+| `--sync-folder <path>` | `./workspace` | Where the instance's files are kept locally. Used as given: a one-directory engine (Jupyter) syncs into it directly, ComfyUI keeps `output/` and `workflows/` under it. Resolved to an absolute path and stored on the instance, so a later `tunnel` or `start` from a different directory syncs to the same place. Virtualenvs, `__pycache__`, `.git`, `node_modules`, `.ipynb_checkpoints` and tool caches are excluded in both directions. Ignored by engines that write nothing. |
 | `--provisioning <url>` | none | URL of a shell script the instance downloads and runs before its service starts. The supported way to get checkpoints and LoRAs onto a disposable machine. ComfyUI only; llama.cpp ignores it. The script runs on your rented machine **with your HF and CivitAI tokens in its environment**, so point it only at something you control. |
 | `--create-instance-only` | off | Create the instance and print SSH details, then stop. No tunnel, no health check, no auto-destroy. For debugging a deploy by hand. |
 
 ```bash
 mycodeagent init coder                              # cheapest 24 GB card, anywhere
 mycodeagent init coder-max --country NO,SE,DK       # Nordics only
-mycodeagent init jupyter --sync-folder ~/notebooks  # notebooks in ~/notebooks/workspace/
+mycodeagent init jupyter --sync-folder ~/notebooks  # notebooks in ~/notebooks/ itself
 mycodeagent init comfyui \
   --provisioning https://raw.githubusercontent.com/WWTLF/mycodeagent/main/config/provisioning/photoreal.sh
 ```

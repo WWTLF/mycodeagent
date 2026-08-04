@@ -385,3 +385,31 @@ func TestResolveSyncRootAcceptsDot(t *testing.T) {
 		t.Errorf("ResolveSyncRoot(\".\") = %q, want the working directory %q", got, wd)
 	}
 }
+
+// The sync must not carry a project's virtualenv to the instance.
+//
+// `--sync-folder .` points at a project, and a Python project keeps its venv
+// inside it — 4.8 GB of CUDA PyTorch here against 100 MB of real work. rsync
+// copies in directory order, so .venv went first and the data the notebooks
+// read had not arrived eight minutes in: the kernel failed on a data directory
+// that existed and was empty, which reads as a broken path, not a slow copy.
+//
+// It is also useless on arrival. The image has its own interpreter at
+// /venv/main, and a venv built on another machine has that machine's paths
+// baked into its scripts.
+func TestSyncScriptExcludesVirtualenvsAndRepoJunk(t *testing.T) {
+	script := buildSyncScript("host", 22,
+		[]entity.SyncDir{{RemoteCandidates: []string{"/workspace"}, Local: "workspace", Push: true}},
+		"/local/project")
+
+	for _, pattern := range []string{".venv", "__pycache__", ".git", "node_modules", ".ipynb_checkpoints"} {
+		if !strings.Contains(script, "--exclude="+shellQuote(pattern)) {
+			t.Errorf("sync script does not exclude %q:\n%s", pattern, script)
+		}
+	}
+
+	// Both directions, or the venv arrives on the way back instead.
+	if n := strings.Count(script, "--exclude="+shellQuote(".venv")); n != 2 {
+		t.Errorf("expected .venv excluded on push and pull (2 occurrences), got %d", n)
+	}
+}
