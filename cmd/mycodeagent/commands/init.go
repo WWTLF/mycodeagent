@@ -51,6 +51,29 @@ HF_TOKEN for HuggingFace (FLUX, SD3), CIVITAI_TOKEN for civitai.com.
 The script runs on your rented machine with those tokens in its environment, so
 point it only at something you control.`
 
+// portFlagUsage is the one-line form shown in --help listings; portHelp is the
+// long form. Both live here because init, start and tunnel all take the flag and
+// must describe it identically.
+const portFlagUsage = "Local port for the SSH tunnel (default: next one free from base_port)"
+
+const portHelp = `--port pins the local end of the SSH tunnel.
+
+By default the next free port at or above base_port (~/.mycodeagent/config.yaml,
+8000 unless changed) is taken, so several instances can run at once without you
+tracking numbers: the first gets 8000, the second 8001, and so on.
+
+  --port 8010
+
+Pin it when something else already names the URL — an opencode profile, a script,
+a browser tab — and has to keep working across a stop/start, which otherwise
+reassigns the port. An unavailable port is reported straight away, before the
+command does anything that costs money or time.
+
+The port is claimed (held open) as soon as it is chosen, and 'init' and 'start'
+print the resulting URL as their first line — so the address is known while the
+deploy is still provisioning. With --create-instance-only nothing is claimed and
+no tunnel is opened: there the flag only sets the port in the printed ssh recipe.`
+
 const countryHelp = `Restrict the offer search to these countries (ISO-3166 alpha-2, comma-separated).
 
 Offers are otherwise picked purely by price, which is how three deploys in a row
@@ -101,6 +124,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 	var country string
 	var provisioning string
 	var syncFolder string
+	var port int
 
 	cmd := &cobra.Command{
 		Use:   "init <model>",
@@ -108,7 +132,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 		Long: "Rent a GPU, start llama-server and open an SSH tunnel.\n\n" +
 			"The instance is destroyed automatically if startup fails, so a broken\n" +
 			"deploy never leaves a paid GPU running.\n\n" +
-			provisioningHelp + "\n\n" + syncFolderHelp + "\n\n" + countryHelp,
+			portHelp + "\n\n" + provisioningHelp + "\n\n" + syncFolderHelp + "\n\n" + countryHelp,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// cmd.Context() carries the SIGINT cancellation wired in main.go —
@@ -125,6 +149,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 				Countries:          countries,
 				ProvisioningScript: provisioning,
 				SyncFolder:         syncFolder,
+				LocalPort:          port,
 			}
 
 			if createOnly {
@@ -149,10 +174,14 @@ func NewInitCmd(app *application.App) *cobra.Command {
 				fmt.Println("Run model server on the instance:")
 				fmt.Printf("  %s\n", result.ServeCommand)
 				fmt.Println()
-				fmt.Println("Set up SSH tunnel to llama-server (port 8000):")
-				fmt.Printf("  ssh -p %d root@%s -L 8080:localhost:8000\n", inst.SSHPort, inst.SSHHost)
+				// Ports and URL shape come from the result, not from here: the
+				// engine owns both, and this used to name llama.cpp's 8000 and a
+				// /v1 suffix for ComfyUI and Jupyter alike.
+				fmt.Printf("Set up SSH tunnel to the server (remote port %d):\n", result.ServerPort)
+				fmt.Printf("  ssh -p %d root@%s -L %d:localhost:%d\n",
+					inst.SSHPort, inst.SSHHost, result.LocalPort, result.ServerPort)
 				fmt.Println()
-				fmt.Println("Once the tunnel is up, the API will be at: http://localhost:8080/v1")
+				fmt.Printf("Once the tunnel is up, it will answer at: %s\n", result.EndpointURL)
 				return nil
 			}
 
@@ -165,6 +194,7 @@ func NewInitCmd(app *application.App) *cobra.Command {
 	cmd.Flags().StringVar(&country, "country", "", "Comma-separated ISO-3166 alpha-2 country codes to rent in (see --help for the list)")
 	cmd.Flags().StringVar(&provisioning, "provisioning", "", "URL of a script the instance runs before starting, to fetch models (ComfyUI only)")
 	cmd.Flags().StringVar(&syncFolder, "sync-folder", "", "Local directory to sync notebooks / ComfyUI output into (default ./"+entity.DefaultSyncRootName+")")
+	cmd.Flags().IntVar(&port, "port", 0, portFlagUsage)
 
 	return cmd
 }

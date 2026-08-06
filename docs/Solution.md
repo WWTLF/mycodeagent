@@ -161,7 +161,7 @@ All interfaces live in `internal/domain/service/` so the domain layer never impo
 | Interface | Purpose | Implementation |
 |---|---|---|
 | **`VastaiProvider`** | Vast.ai REST: search offers (with min host-disk filter), create/wait/destroy instances, instance read access (`GetInstance`, `ListRemoteInstances`, `GetInstanceLogs`), credential operations (`VerifyAPIKey`, `ListSSHKeys`, `CreateSSHKey`). Returns `service.RemoteInstance` DTOs, never raw `vastai.InstanceInfo`. | `vastai.Adapter` |
-| **`SSHTunnelProvider`** | SSH operations: `StartTunnel`, `StopTunnel`, `WaitForSSH`, `FindFreePort`, `RunRemoteCommand`, `WaitForServerHealth`. | `ssh.Adapter` |
+| **`SSHTunnelProvider`** | SSH operations: `StartTunnel`, `StopTunnel`, `WaitForSSH`, `ReservePort` (claims *and holds* the local port), `RunRemoteCommand`, `WaitForServerHealth`. | `ssh.Adapter` |
 | **`EngineProvider`** | Engine-specific deploy details (Docker image, onstart script, restart commands, liveness probe, log path, service port, health path, container env). | `engine.MultiEngine`, dispatching to `LlamaCppEngine` / `ComfyUIEngine` / `JupyterEngine` |
 | **`ServerProbe`** | Localhost HTTP probe: `/v1/models` for the served model id, then `/props` for the real `n_ctx`. Best-effort. | `serverprobe.Probe` |
 | **`CredentialStore`** | Persists vast.ai key + HF token. Used only by `App.Login`. | `config.Store` |
@@ -235,12 +235,15 @@ sequenceDiagram
     participant SSHTunnelProvider
     participant Remote as GPU Instance
 
-    User->>CLI: mycodeagent init MODEL
-    CLI->>DeployService: Deploy(ctx, modelName)
+    User->>CLI: mycodeagent init MODEL [--port N]
+    CLI->>DeployService: Deploy(ctx, modelName, opts)
 
     Note over DeployService: Wrap ctx with model.StartupTimeout
 
     DeployService->>DeployService: Resolve model; compute disk = Model.DiskGB
+    DeployService->>SSHTunnelProvider: ReservePort(opts.LocalPort, basePort)
+    SSHTunnelProvider-->>DeployService: localPort (socket held)
+    DeployService->>User: http://localhost:localPort/v1 — before anything is billing
     DeployService->>VastaiProvider: SearchOffers(VRAM, numGPUs, disk+headroom)
     VastaiProvider-->>DeployService: Cheapest verified offer
     DeployService->>VastaiProvider: CreateInstance(offer, image, env, onstart, diskGB)
@@ -256,7 +259,7 @@ sequenceDiagram
         Note over VastaiProvider: poll until "running"; destroy on deverified
         VastaiProvider-->>DeployService: sshHost, sshPort, rate
         DeployService->>SSHTunnelProvider: WaitForSSH(ctx)
-        DeployService->>SSHTunnelProvider: FindFreePort → StartTunnel
+        DeployService->>SSHTunnelProvider: release reservation → StartTunnel
         SSHTunnelProvider-->>DeployService: tunnelPID
 
         par Health poll
@@ -533,7 +536,15 @@ graph LR
     style TUNNEL fill:#40916c,color:#fff
 ```
 
-- Each `init` allocates a new local port (starting from `basePort`, scanning +100).
+- **The local port is reserved before the GPU is rented, and announced first.** `init`, `start` and `tunnel` take the next port free from `basePort` (scanning +100), or the one `--port` names. The endpoint URL is then the *first* line of the run rather than the last — it used to be printed only after the health check, so for the twenty minutes a deploy spends provisioning and downloading, the address it would end up on was unknowable, which is exactly what someone about to start a second instance needs.
+
+  Announcing it early only works if the number is still true when ssh binds it minutes later, so `ReservePort` **holds an open socket** for the duration. The predecessor, `FindFreePort`, bound a port, closed it and returned the number — a snapshot that left the whole provisioning window open for a concurrent `init` to pick the same one. Both would announce the same URL and the loser's tunnel would die on `bind: Address already in use`, which during a deploy destroys the instance. A pinned `--port` that is already taken fails on the spot, before anything is billing, instead of surfacing ten minutes later as a tunnel that cannot start.
+
+  Three details follow from the socket being *held* rather than probed. It binds **127.0.0.1**, which is what `ssh -L` binds: the wildcard `:port` is stricter than ssh (a service on another interface would make a usable port look taken) and would expose the port to the LAN for the length of a download. It **accepts and immediately closes** anything that connects, because an unaccepted listener completes the handshake into a backlog nobody reads and leaves an early client hanging until its own timeout, where an instant EOF reads as "not up yet". And the handoff belongs to `StartTunnel`, which drops the reservation itself immediately before exec'ing ssh — a release left to the caller can be lost in a refactor, and the failure is not loud: ssh exits on the bind, but `StartTunnel`'s readiness dial connects to the *reservation's* listener and reports a healthy tunnel for a dead process.
+
+  `EstablishTunnel` kills the stale tunnel **before** reserving, and the order is load-bearing: the port a re-attach wants is usually the one that tunnel is still holding, so reserving first made `tunnel --port <that port>` fail on a port the same call was about to free.
+
+  `--port` exists because the auto-assignment is not stable: `stop`/`start` and `tunnel` rebuild the tunnel and may land elsewhere, so anything holding a fixed URL — an opencode profile, a script — breaks. Pinning is how that config survives a restart.
 - Tunnel runs as a background `ssh -N -L` process; PID saved to SQLite.
 - **`StartTunnel` returns only once the forward accepts connections.** It used to `Start()` the process and report success immediately, so an ssh that died on the spot — rejected key, refused forward — still yielded a PID. The deploy then polled a local port with nothing behind it until its deadline, and the dead ssh lingered as a zombie because nobody reaped it. A `cmd.Wait()` goroutine now both reaps the child and surfaces an instant exit, and the function dials the local port before claiming success.
 - **`WaitForSSH` authenticates, it does not merely dial.** vast.ai answers on the forwarded SSH port well before the instance accepts a key — and sometimes never accepts it: a host was observed answering TCP while every exchange returned `Permission denied (publickey)`, its sshd reporting a different OpenSSH build than the container runs. A TCP-only check passed that host and cost a whole deploy. The probe runs a real command over the same `baseArgs` the tunnel uses, so it proves what the tunnel needs. A failure here is host-side, so the machine is blacklisted — which is what the old check silently skipped.

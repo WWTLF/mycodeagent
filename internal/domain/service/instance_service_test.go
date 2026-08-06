@@ -349,3 +349,82 @@ func TestDetectModelIgnoresCatalogEntriesWithNoRepo(t *testing.T) {
 		})
 	}
 }
+
+// `tunnel` is what you reach for after a dropped connection, and the client on
+// the other end is already configured for a URL. Without --port the re-attach
+// picks whatever the scan lands on and that config silently points at nothing.
+func TestEstablishTunnelUsesTheRequestedLocalPort(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		asked    int
+		wantPort int
+	}{
+		{"default takes the next free port from base", 0, 8000},
+		{"--port pins it", 9123, 9123},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeInstanceRepo(&entity.Instance{
+				VastaiID: 42, ModelName: "test-model", Status: entity.StatusRunning,
+			})
+			vast := &fakeVastai{remote: []*RemoteInstance{{
+				VastaiID: 42, ActualStatus: "running", SSHHost: "ssh.example", SSHPort: 2222,
+			}}}
+			ssh := &fakeSSH{tunnelPID: 4242}
+			svc := newTestInstanceSvc(repo, vast, ssh)
+
+			inst, err := svc.EstablishTunnel(context.Background(), 42, tc.asked)
+			if err != nil {
+				t.Fatalf("establish tunnel: %v", err)
+			}
+			if got := ssh.localPortOfTunnel(); got != tc.wantPort {
+				t.Errorf("tunnel opened on local port %d, want %d", got, tc.wantPort)
+			}
+			if inst.LocalPort != tc.wantPort {
+				t.Errorf("instance row records port %d, want %d", inst.LocalPort, tc.wantPort)
+			}
+			if ssh.tunnelStartedWhileHeld() {
+				t.Error("the tunnel was started while the port reservation was still held — ssh would fail to bind")
+			}
+		})
+	}
+}
+
+// The port a re-attach wants back is usually the one the instance's own stale
+// tunnel is still holding, so the stale tunnel has to die *before* the
+// reservation is taken. Reserving first made `tunnel --port <that port>` fail on
+// a port this very call was about to free, and made the default scan step past
+// it to a neighbour — moving the instance off the URL its client was configured
+// for, quietly.
+func TestEstablishTunnelReclaimsThePortItsStaleTunnelHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		asked int
+	}{
+		{"pinned to the port the stale tunnel holds", 8000},
+		{"default scan, same port is the first candidate", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeInstanceRepo(&entity.Instance{
+				VastaiID: 42, ModelName: "test-model", Status: entity.StatusRunning,
+				LocalPort: 8000, TunnelPID: 111,
+			})
+			vast := &fakeVastai{remote: []*RemoteInstance{{
+				VastaiID: 42, ActualStatus: "running", SSHHost: "ssh.example", SSHPort: 2222,
+			}}}
+			// The old tunnel is alive and occupying 8000.
+			ssh := &fakeSSH{tunnelPID: 4242, tunnelPorts: map[int]int{111: 8000}}
+			svc := newTestInstanceSvc(repo, vast, ssh)
+
+			inst, err := svc.EstablishTunnel(context.Background(), 42, tc.asked)
+			if err != nil {
+				t.Fatalf("establish tunnel: %v", err)
+			}
+			if inst.LocalPort != 8000 {
+				t.Errorf("re-attached on port %d, want the instance's own 8000 back", inst.LocalPort)
+			}
+			if stopped := ssh.stopped(); len(stopped) != 1 || stopped[0] != 111 {
+				t.Errorf("stale tunnel 111 was not stopped: %v", stopped)
+			}
+		})
+	}
+}

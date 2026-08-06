@@ -117,11 +117,14 @@ func (s *InstanceService) TunnelURL(inst *entity.Instance) string {
 	if inst == nil || inst.LocalPort <= 0 {
 		return ""
 	}
-	base := fmt.Sprintf("http://localhost:%d", inst.LocalPort)
-	if s.servesOpenAIAPIByName(inst.ModelName) {
-		return base + "/v1"
+	// Same builder the deploy announces with, asked about a stored row rather
+	// than a catalog entry. A second copy of the /v1 rule here is exactly the
+	// drift endpointURL exists to prevent.
+	model, err := s.models.FindByName(inst.ModelName)
+	if err != nil {
+		model = nil // nil reads as llama.cpp, matching servesOpenAIAPIByName
 	}
-	return base
+	return endpointURL(model, inst.LocalPort)
 }
 
 // HealthProbe says how to check an instance through its tunnel: the URL to GET,
@@ -185,15 +188,13 @@ func (s *InstanceService) StartTunnel(ctx context.Context, instanceID int64, loc
 		return 0, fmt.Errorf("find instance: %w", err)
 	}
 
-	if localPort <= 0 {
-		port, err := s.ssh.FindFreePort(s.basePort)
-		if err != nil {
-			return 0, fmt.Errorf("find free port: %w", err)
-		}
-		localPort = port
+	localPort, releasePort, err := s.ssh.ReservePort(localPort, s.basePort)
+	if err != nil {
+		return 0, fmt.Errorf("reserve local port: %w", err)
 	}
+	defer releasePort()
 
-	pid, err := s.ssh.StartTunnel(localPort, inst.SSHHost, inst.SSHPort, s.remotePort(inst.ModelName))
+	pid, err := s.ssh.StartTunnel(localPort, inst.SSHHost, inst.SSHPort, s.remotePort(inst.ModelName), releasePort)
 	if err != nil {
 		return 0, fmt.Errorf("start tunnel: %w", err)
 	}
@@ -225,18 +226,37 @@ func (s *InstanceService) StopTunnel(ctx context.Context, instanceID int64) erro
 // EstablishTunnel is the full "re-attach to an existing instance" flow used by
 // the tunnel command. It looks up the instance by vast.ai ID (not local ID),
 // kills any stale tunnel, refreshes SSH info from vast.ai, waits for SSH,
-// allocates a free local port, starts the tunnel process, and persists the
-// updated instance row. Returns the updated instance for the command to print.
-func (s *InstanceService) EstablishTunnel(ctx context.Context, vastaiID int64) (*entity.Instance, error) {
+// allocates a local port, starts the tunnel process, and persists the updated
+// instance row. Returns the updated instance for the command to print.
+//
+// localPort pins the local end; zero takes the next free one. Pinning is what
+// makes a re-attach land back on the URL a client is already configured with,
+// instead of wherever the scan happens to stop this time.
+func (s *InstanceService) EstablishTunnel(ctx context.Context, vastaiID int64, localPort int) (*entity.Instance, error) {
 	inst, err := s.instances.FindByVastaiID(vastaiID)
 	if err != nil {
 		return nil, err
 	}
 
 	// Kill old tunnel if still referenced.
+	//
+	// Strictly before the reservation, and that ordering is the whole point of
+	// this command: the port it wants back is usually the one the stale tunnel
+	// is still holding. Reserving first made `tunnel --port <the old one>` fail
+	// on a port this call was about to free, and made the default scan skip past
+	// it to a neighbour — silently moving the instance off the URL its client
+	// was configured for.
 	if inst.TunnelPID > 0 {
 		_ = s.ssh.StopTunnel(inst.TunnelPID)
 	}
+
+	// Then claim it, still up front, so an unavailable --port is reported before
+	// the two minutes this spends waiting on SSH rather than after.
+	localPort, releasePort, err := s.ssh.ReservePort(localPort, s.basePort)
+	if err != nil {
+		return nil, fmt.Errorf("reserve local port: %w", err)
+	}
+	defer releasePort()
 
 	// Refresh SSH info from vast.ai.
 	remote, err := s.vastai.GetInstance(ctx, int(inst.VastaiID))
@@ -263,12 +283,7 @@ func (s *InstanceService) EstablishTunnel(ctx context.Context, vastaiID int64) (
 		return nil, fmt.Errorf("SSH not reachable: %w", err)
 	}
 
-	localPort, err := s.ssh.FindFreePort(s.basePort)
-	if err != nil {
-		return nil, err
-	}
-
-	pid, err := s.ssh.StartTunnel(localPort, sshHost, sshPort, s.remotePort(inst.ModelName))
+	pid, err := s.ssh.StartTunnel(localPort, sshHost, sshPort, s.remotePort(inst.ModelName), releasePort)
 	if err != nil {
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}

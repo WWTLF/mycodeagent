@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -357,7 +358,7 @@ func TestStartRefreshesSSHAndReopensTunnel(t *testing.T) {
 	svc, _ := newTestDeploy(model, vast, ssh, repo)
 
 	id := repo.ids()[0]
-	if err := svc.Start(context.Background(), id); err != nil {
+	if err := svc.Start(context.Background(), id, 0); err != nil {
 		t.Fatalf("start failed: %v", err)
 	}
 	if len(vast.started) != 1 || vast.started[0] != 55 {
@@ -391,7 +392,7 @@ func TestStartDoesNotDestroyOnFailure(t *testing.T) {
 	vast := &fakeVastai{waitErr: context.DeadlineExceeded}
 	svc, _ := newTestDeploy(model, vast, &fakeSSH{}, repo)
 
-	if err := svc.Start(context.Background(), repo.ids()[0]); err == nil {
+	if err := svc.Start(context.Background(), repo.ids()[0], 0); err == nil {
 		t.Fatal("expected start to fail")
 	}
 	if len(vast.destroyed) != 0 {
@@ -692,5 +693,157 @@ func TestWatcherStillCatchesACrashAfterTheServerWasAlive(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "crashed") {
 		t.Errorf("a server that died after starting must be reported as a crash: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------- local port
+
+// The endpoint used to be the *last* line a deploy printed, after the health
+// check — twenty minutes in on a big model. Until then the operator could not
+// tell which port this run would land on, which is precisely what someone about
+// to start a second instance needs to know. Printing it first is only possible
+// because the port is now claimed before anything is rented.
+func TestDeployAnnouncesTheEndpointBeforeItRentsAnything(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+	ssh := &fakeSSH{tunnelPID: 31337}
+	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
+
+	out := captureStdout(t, func() {
+		if _, err := svc.Deploy(context.Background(), "test-model", DeployOptions{}); err != nil {
+			t.Errorf("deploy: %v", err)
+		}
+	})
+
+	endpoint := strings.Index(out, "http://localhost:8000/v1")
+	if endpoint < 0 {
+		t.Fatalf("the deploy never printed the endpoint:\n%s", out)
+	}
+	// Everything that spends money, or time, has to come after it.
+	for _, later := range []string{"Searching for", "Creating instance", "Starting SSH tunnel"} {
+		if at := strings.Index(out, later); at >= 0 && at < endpoint {
+			t.Errorf("%q was printed before the endpoint — the URL must be the first thing out:\n%s", later, out)
+		}
+	}
+}
+
+// Zero means "next one free from base_port", which is what lets several
+// instances coexist without the operator tracking numbers; a non-zero LocalPort
+// pins it, for when a client config already names the URL.
+func TestDeployUsesTheRequestedLocalPort(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		asked    int
+		wantPort int
+	}{
+		{"default takes the next free port from base", 0, 8000},
+		{"--port pins it", 9123, 9123},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeInstanceRepo()
+			vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+			ssh := &fakeSSH{tunnelPID: 31337}
+			svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
+
+			inst, err := svc.Deploy(context.Background(), "test-model", DeployOptions{LocalPort: tc.asked})
+			if err != nil {
+				t.Fatalf("deploy: %v", err)
+			}
+			if got := ssh.localPortOfTunnel(); got != tc.wantPort {
+				t.Errorf("tunnel opened on local port %d, want %d", got, tc.wantPort)
+			}
+			// ps, config and the server probe all read the row, not the tunnel.
+			if inst.LocalPort != tc.wantPort {
+				t.Errorf("instance row records port %d, want %d", inst.LocalPort, tc.wantPort)
+			}
+		})
+	}
+}
+
+// The reservation is a real held socket, so ssh cannot bind the port while the
+// deploy still owns it. Handing it over is a step that is easy to lose in a
+// refactor and would deadlock only on a live deploy, never in a unit test that
+// mocks the tunnel — hence an explicit assertion.
+func TestDeployReleasesTheReservedPortBeforeStartingTheTunnel(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+	ssh := &fakeSSH{tunnelPID: 31337}
+	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
+
+	if _, err := svc.Deploy(context.Background(), "test-model", DeployOptions{}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if ssh.tunnelStartedWhileHeld() {
+		t.Error("the tunnel was started while the port reservation was still held — ssh would fail to bind")
+	}
+	if len(ssh.reservedPorts) != 1 {
+		t.Errorf("expected exactly one reservation, got %v", ssh.reservedPorts)
+	}
+}
+
+// An unavailable port is worth a one-line error now rather than the same error
+// after a GPU has been billing through a ten-minute provisioning phase.
+func TestDeployRefusesAnUnavailablePortBeforeRenting(t *testing.T) {
+	repo := newFakeInstanceRepo()
+	vast := &fakeVastai{offers: oneOffer(), createdID: 4242}
+	ssh := &fakeSSH{reserveErr: errors.New("local port 9123 is already in use")}
+	svc, _ := newTestDeploy(testDeployModel(), vast, ssh, repo)
+
+	if _, err := svc.Deploy(context.Background(), "test-model", DeployOptions{LocalPort: 9123}); err == nil {
+		t.Fatal("expected the deploy to fail on the unavailable port")
+	}
+	if vast.creates != 0 {
+		t.Errorf("rented %d instance(s) despite the port being unavailable", vast.creates)
+	}
+	if repo.count() != 0 {
+		t.Errorf("left %d local row(s) behind", repo.count())
+	}
+}
+
+// stop/start reassigns the SSH endpoint and therefore rebuilds the tunnel, which
+// is exactly when a hardcoded client URL breaks. Pinning is the way to keep it.
+func TestStartUsesTheRequestedLocalPort(t *testing.T) {
+	model := testDeployModel()
+	repo := newFakeInstanceRepo(&entity.Instance{
+		VastaiID: 55, ModelName: model.Name, Status: entity.StatusStopped,
+	})
+	vast := &fakeVastai{}
+	ssh := &fakeSSH{tunnelPID: 777}
+	svc, _ := newTestDeploy(model, vast, ssh, repo)
+
+	if err := svc.Start(context.Background(), repo.ids()[0], 9123); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	if got := ssh.localPortOfTunnel(); got != 9123 {
+		t.Errorf("tunnel opened on local port %d, want the pinned 9123", got)
+	}
+	got, _ := repo.FindByID(repo.ids()[0])
+	if got.LocalPort != 9123 {
+		t.Errorf("instance row records port %d, want 9123", got.LocalPort)
+	}
+	if ssh.tunnelStartedWhileHeld() {
+		t.Error("the tunnel was started while the port reservation was still held")
+	}
+}
+
+// "Next one free" is the whole reason several instances can run at once, and it
+// only holds if a port already carrying a tunnel is skipped. Sharing one ssh
+// provider across the deploys is what models that: each tunnel keeps its port.
+func TestConcurrentDeploysStackOntoSuccessivePorts(t *testing.T) {
+	ssh := &fakeSSH{}
+
+	for i, want := range []int{8000, 8001, 8002} {
+		ssh.tunnelPID = 100 + i // distinct tunnels, so each holds its own port
+		vast := &fakeVastai{offers: oneOffer(), createdID: 4242 + i}
+		svc, _ := newTestDeploy(testDeployModel(), vast, ssh, newFakeInstanceRepo())
+
+		inst, err := svc.Deploy(context.Background(), "test-model", DeployOptions{})
+		if err != nil {
+			t.Fatalf("deploy %d: %v", i, err)
+		}
+		if inst.LocalPort != want {
+			t.Errorf("deploy %d landed on port %d, want %d — instances must not collide",
+				i, inst.LocalPort, want)
+		}
 	}
 }

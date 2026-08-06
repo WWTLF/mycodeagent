@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +12,11 @@ import (
 )
 
 // captureStdout runs fn and returns whatever it printed.
+//
+// It drains to EOF rather than taking a single Read: one Read returns only what
+// happens to be buffered when the reader is scheduled, which is fine for the
+// one-line reporter output below but silently truncates anything that prints in
+// several calls — a whole deploy, for instance.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -20,9 +27,10 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = w
 	done := make(chan string, 1)
 	go func() {
-		buf := make([]byte, 8192)
-		n, _ := r.Read(buf)
-		done <- string(buf[:n])
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		r.Close()
+		done <- buf.String()
 	}()
 	fn()
 	w.Close()

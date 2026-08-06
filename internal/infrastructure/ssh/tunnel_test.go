@@ -43,7 +43,7 @@ func TestStartTunnelFailsWhenSSHCannotConnect(t *testing.T) {
 
 	local := closedPort(t)
 	start := time.Now()
-	tun, err := StartTunnel(local, "127.0.0.1", closedPort(t), 8000)
+	tun, err := StartTunnel(local, "127.0.0.1", closedPort(t), 8000, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -443,5 +443,195 @@ func TestBaseArgsSharedByProbeAndTunnel(t *testing.T) {
 		if !strings.Contains(args, "IdentitiesOnly=yes") {
 			t.Errorf("baseArgs offers agent keys ahead of %q: %s", key, args)
 		}
+	}
+}
+
+// The predecessor of this function bound a port, closed it and returned the
+// number. That is a snapshot, and the number is now used as a promise: it is
+// printed before the GPU is rented and bound by ssh ten minutes later. Two
+// concurrent deploys would both be handed the same port, announce the same URL,
+// and the loser's tunnel would die on `bind: Address already in use` — which,
+// during a deploy, destroys the instance it was tearing a tunnel down for.
+func TestReservePortHoldsThePortUntilReleased(t *testing.T) {
+	const base = 45000
+
+	first, releaseFirst, err := ReservePort(0, base)
+	if err != nil {
+		t.Fatalf("first reservation: %v", err)
+	}
+	defer releaseFirst()
+
+	second, releaseSecond, err := ReservePort(0, base)
+	if err != nil {
+		t.Fatalf("second reservation: %v", err)
+	}
+	defer releaseSecond()
+
+	if second == first {
+		t.Fatalf("both reservations got port %d — the first was not held", first)
+	}
+
+	// A pinned port that is taken has to fail now, not when ssh gets to it.
+	if _, _, err := ReservePort(first, base); err == nil {
+		t.Errorf("pinning the held port %d succeeded; --port must fail on a busy port", first)
+	}
+
+	// Releasing hands it over — this is what happens just before StartTunnel.
+	releaseFirst()
+	releaseFirst() // idempotent: callers defer it *and* call it explicitly
+	third, releaseThird, err := ReservePort(first, base)
+	if err != nil {
+		t.Fatalf("reserving the released port %d: %v", first, err)
+	}
+	defer releaseThird()
+	if third != first {
+		t.Errorf("released port %d was not reusable, got %d", first, third)
+	}
+}
+
+// A port genuinely in use by something else is the everyday case for --port.
+func TestReservePortRejectsAPinnedPortInUse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	busy := ln.Addr().(*net.TCPAddr).Port
+
+	port, release, err := ReservePort(busy, 45000)
+	if err == nil {
+		release()
+		t.Fatalf("reserved port %d while it was in use", port)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprint(busy)) {
+		t.Errorf("error should name the port the user asked for: %v", err)
+	}
+}
+
+// The scan is what makes concurrent instances work without the operator picking
+// numbers: hold a run of ports and the next reservation steps past all of them.
+func TestReservePortScansPastHeldPorts(t *testing.T) {
+	const base = 46000
+
+	var releases []func()
+	defer func() {
+		for _, r := range releases {
+			r()
+		}
+	}()
+
+	seen := map[int]bool{}
+	for i := 0; i < 3; i++ {
+		port, release, err := ReservePort(0, base)
+		if err != nil {
+			t.Fatalf("reservation %d: %v", i, err)
+		}
+		releases = append(releases, release)
+		if seen[port] {
+			t.Fatalf("port %d handed out twice", port)
+		}
+		seen[port] = true
+		if port < base || port >= base+portScanRange {
+			t.Errorf("port %d outside the scan range %d-%d", port, base, base+portScanRange-1)
+		}
+	}
+}
+
+// StartTunnel owns the reservation handoff, and this is why: if the port is
+// still held when ssh runs, ssh exits on `bind: Address already in use` — but
+// the readiness dial below finds the *reservation's* listener, connects
+// happily, and reports a working tunnel for a process that is already dead. The
+// deploy then burns its whole deadline health-checking a forward that does not
+// exist. Passing the release in makes the wrong order unrepresentable; this
+// test proves the right one is what actually happens.
+func TestStartTunnelReleasesTheReservationBeforeBinding(t *testing.T) {
+	requireSSH(t)
+
+	port, release, err := ReservePort(0, 47000)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	defer release()
+
+	// ssh cannot reach a closed port, so it exits at once. What matters is that
+	// the failure is *reported* rather than hidden behind the reservation.
+	tun, err := StartTunnel(port, "127.0.0.1", closedPort(t), 8000, release)
+	if err == nil {
+		t.Fatalf("reported success for a tunnel that cannot exist: %+v", tun)
+	}
+	if !strings.Contains(err.Error(), "exited immediately") {
+		t.Errorf("failure not attributed to ssh exiting — the reservation may have answered the readiness dial: %v", err)
+	}
+	if conn, derr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond); derr == nil {
+		conn.Close()
+		t.Errorf("local port %d still answers: the reservation outlived the tunnel start", port)
+	}
+}
+
+// A reservation is held for the whole deploy, so anything that tries the
+// announced URL early must be turned away promptly. An unaccepted listener
+// completes the handshake into its backlog and leaves the client hanging until
+// its own timeout, which is a worse signal than a refusal.
+func TestReservedPortDoesNotLeaveCallersHanging(t *testing.T) {
+	port, release, err := ReservePort(0, 47500)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	defer release()
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		return // refused outright is fine too
+	}
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("the reservation served data; it must only hang up")
+	} else if errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Error("the reservation accepted a connection and left it hanging instead of closing it")
+	}
+}
+
+// The reservation must bind exactly what `ssh -L` binds. The wildcard form used
+// before is stricter than ssh: a service on another interface would make a
+// perfectly usable port look taken.
+func TestReservePortBindsLoopbackNotTheWildcard(t *testing.T) {
+	port, release, err := ReservePort(0, 47800)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	defer release()
+
+	// If the reservation had taken 0.0.0.0, this second bind would fail.
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	if err == nil {
+		ln.Close()
+		t.Errorf("port %d was reservable on 0.0.0.0 as well — the reservation is not loopback-only", port)
+	}
+}
+
+// --port must not silently become something else, and the diagnosis has to name
+// the real cause: bind fails with permission denied under 1024 just as readily
+// as with address-in-use.
+func TestReservePortRejectsPortsItCannotHonour(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		port int
+		want string
+	}{
+		{"negative", -1, "invalid local port"},
+		{"above the range", 70000, "invalid local port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			port, release, err := ReservePort(tc.port, 48000)
+			if err == nil {
+				release()
+				t.Fatalf("accepted %d and quietly returned %d", tc.port, port)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not contain %q", err, tc.want)
+			}
+		})
 	}
 }

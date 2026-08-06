@@ -13,13 +13,13 @@ Key reference: https://docs.vast.ai/api-reference/introduction
 | Command | Purpose |
 |---|---|
 | `mycodeagent models` | List available models with live cheapest-offer pricing |
-| `mycodeagent init <model>` | Deploy model: rent GPU, start `llama-server` (downloads the GGUF from HuggingFace), establish SSH tunnel. Destroys the instance automatically if startup fails. `--country FR,DE` restricts the offer search. |
+| `mycodeagent init <model>` | Deploy model: rent GPU, start `llama-server` (downloads the GGUF from HuggingFace), establish SSH tunnel. Destroys the instance automatically if startup fails. `--country FR,DE` restricts the offer search; `--port 8010` pins the local end of the tunnel. |
 | `mycodeagent ps` | Sync with vast.ai and list deployed instances |
 | `mycodeagent stop <id>` | Release the GPU, keep the instance + container disk (disk keeps billing) |
-| `mycodeagent start <id>` | Resume a stopped instance and reopen its tunnel; skips the GGUF download |
+| `mycodeagent start <id>` | Resume a stopped instance and reopen its tunnel (`--port` to keep the old one); skips the GGUF download |
 | `mycodeagent kill <id>` | Destroy an instance permanently — the cheap way to finish |
 | `mycodeagent restart <id>` | Regenerate the startup script and restart the server |
-| `mycodeagent tunnel <vastai_id>` | Re-attach an SSH tunnel to a running instance |
+| `mycodeagent tunnel <vastai_id>` | Re-attach an SSH tunnel to a running instance (`--port` to land back on a known URL) |
 | `mycodeagent log <id>` | Fetch the vast.ai bootstrap log |
 | `mycodeagent budget` | Show consumption by instances |
 | `mycodeagent config` | Write all running instances into `~/.config/opencode/opencode.jsonc` |
@@ -56,7 +56,7 @@ Dependencies point inward: Infrastructure → Domain ← Application. Domain has
 - HF_TOKEN only needed for gated models; the current catalog (Qwen3.5 / Qwen3.6 quants from unsloth and mradermacher) is public.
 - **The catalog is four VRAM tiers — 16 / 24 / 32 / 48 GB — plus explicit MoE entries (`coder-fast` at 24 GB; `coder-fast-max`, `coder-xl` and `coder-glm` at 48 GB) and one uncensored model at 32 GB**, all single-GPU. It is optimised for **capability first**: the working tiers are dense models (all parameters active per token), with MoE kept as explicit named entries rather than a default. Sizing is driven by the KV cache, not the weights — see `docs/Solution.md` for the arithmetic before changing `ContextLength` or `Quant`.
 - **Quant tags must match exactly one file in the repo.** `Q6_K` also matches `UD-Q6_K_XL`, and llama.cpp resolves the ambiguity silently. Check any new tag against the repo's file list.
-- SSH tunnels forward a local port to the remote `llama-server` port 8000; each `init` allocates a new local port for concurrency.
+- SSH tunnels forward a local port to the remote `llama-server` port 8000; each `init` takes the next port free from `base_port` (8000), so instances stack up without collision. The port is **reserved (a held socket) before the GPU is rented** and announced as the first line of the run — `--port` pins it instead, and fails immediately if it is busy.
 - State persisted in `~/.mycodeagent/mycodeagent.db` (SQLite). Host blacklisting (`bad_hosts`) is applied only for host-side failures, never model-side crashes.
 
 @docs/Solution.md

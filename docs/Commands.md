@@ -159,10 +159,12 @@ a broken `init` never leaves a paid GPU running. Ctrl-C does the same.
 | `--sync-folder <path>` | `./workspace` | Where the instance's files are kept locally. Used as given: a one-directory engine (Jupyter) syncs into it directly, ComfyUI keeps `output/` and `workflows/` under it. Resolved to an absolute path and stored on the instance, so a later `tunnel` or `start` from a different directory syncs to the same place. Virtualenvs, `__pycache__`, `.git`, `node_modules`, `.ipynb_checkpoints` and tool caches are excluded in both directions. Ignored by engines that write nothing. |
 | `--provisioning <url>` | none | URL of a shell script the instance downloads and runs before its service starts. The supported way to get checkpoints and LoRAs onto a disposable machine. ComfyUI only; llama.cpp ignores it. The script runs on your rented machine **with your HF and CivitAI tokens in its environment**, so point it only at something you control. |
 | `--create-instance-only` | off | Create the instance and print SSH details, then stop. No tunnel, no health check, no auto-destroy. For debugging a deploy by hand. |
+| `--port <n>` | next free from `base_port` | Local end of the SSH tunnel. The default scan is what lets instances stack up — the first gets 8000, the second 8001 — so pin it only when something else already names the URL and must keep working across a `stop`/`start`. The port is claimed (held open) before the GPU is rented and the resulting URL is the **first line** of the run, so the address is known while the deploy is still provisioning; an unavailable port fails immediately instead of ten minutes in. With `--create-instance-only` nothing is claimed and the flag only sets the port in the printed `ssh` recipe. |
 
 ```bash
 mycodeagent init coder                              # cheapest 24 GB card, anywhere
 mycodeagent init coder-max --country NO,SE,DK       # Nordics only
+mycodeagent init coder --port 8010                  # pin the URL a client is configured for
 mycodeagent init jupyter --sync-folder ~/notebooks  # notebooks in ~/notebooks/ itself
 mycodeagent init comfyui \
   --provisioning https://raw.githubusercontent.com/WWTLF/mycodeagent/main/config/provisioning/photoreal.sh
@@ -185,12 +187,16 @@ health, and the tunnel URL. The URL is the one to open or point a client at.
 ### `tunnel`
 
 ```
-mycodeagent tunnel <vastai_id>
+mycodeagent tunnel <vastai_id> [--port <n>]
 ```
 
 Re-attaches a dead SSH tunnel — **takes the vast.ai ID**, see [above](#which-id-goes-where).
 Reads a fresh SSH host and port from the API (they are reassigned on resume) and
 restarts the file sync alongside it, into the folder the deploy chose.
+
+The stale tunnel is killed before the new local port is claimed, so a re-attach
+normally lands back on the port the instance was already using. `--port` names it
+explicitly when it matters.
 
 ### `restart`
 
@@ -243,13 +249,18 @@ folder has what you want first: the loop runs on a 60-second cycle.
 
 ```
 mycodeagent stop <id>
-mycodeagent start <id>
+mycodeagent start <id> [--port <n>]
 ```
 
 `stop` releases the GPU but keeps the instance and its container disk, which
 **keeps billing** at roughly $0.15/GB/month. `start` resumes it and opens a fresh
 tunnel; the model is still in the container-disk cache, so nothing is
 re-downloaded.
+
+vast.ai reassigns the SSH endpoint on resume, so the tunnel is rebuilt and the
+local port is chosen again — by default the next one free, which need not be the
+one the instance had. `--port` keeps it, and `start` prints the resulting URL as
+its first line either way.
 
 **`stop` never wins on price.** A day of idle 28 GB disk is ~$0.14 against ~$0.004
 of re-download after a `kill`. It exists for the non-price cases: holding a host

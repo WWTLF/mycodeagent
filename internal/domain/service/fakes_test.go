@@ -195,6 +195,7 @@ type fakeVastai struct {
 
 	createdID int
 	createErr error
+	creates   int // how many times CreateInstance was called
 	waitErr   error
 	waitDelay time.Duration // simulated provisioning time
 
@@ -216,6 +217,7 @@ func (v *fakeVastai) SearchOffers(minGPURAM, numGPUs, minDiskGB int, countries [
 }
 func (v *fakeVastai) CreateInstance(offerID int, image string, env map[string]string, onstart string, diskGB int) (int, error) {
 	v.createdEnv = env
+	v.creates++
 	if v.createErr != nil {
 		return 0, v.createErr
 	}
@@ -276,6 +278,17 @@ type fakeSSH struct {
 	stoppedPIDs      []int
 	remoteOut        map[string]string // command substring → output
 	tunnelRemotePort int               // forward target of the last StartTunnel
+	tunnelLocalPort  int               // local end of the last StartTunnel
+
+	reserveErr    error
+	reservedPorts []int        // every port handed out by ReservePort, in order
+	held          map[int]bool // reservations not yet released
+	tunnelOnHeld  bool         // StartTunnel bound a port still under reservation
+	// tunnelPorts models the other thing that occupies a local port: a live ssh
+	// tunnel. Without it a fake reservation always succeeds, and the ordering
+	// bug where a re-attach reserved a port before freeing the stale tunnel
+	// holding it is invisible.
+	tunnelPorts map[int]int // pid → local port
 
 	syncPID      int
 	syncErr      error
@@ -286,14 +299,45 @@ type fakeSSH struct {
 
 var _ SSHTunnelProvider = (*fakeSSH)(nil)
 
-func (s *fakeSSH) StartTunnel(localPort int, host string, port, remotePort int) (int, error) {
+func (s *fakeSSH) StartTunnel(localPort int, host string, port, remotePort int, release func()) (int, error) {
+	// The real one drops the reservation here, before ssh binds. Outside the
+	// lock: release takes it.
+	if release != nil {
+		release()
+	}
 	s.mu.Lock()
 	s.tunnelRemotePort = remotePort
+	s.tunnelLocalPort = localPort
+	// Real ssh cannot bind a port this process still holds, and the readiness
+	// dial would then connect to the reservation and call a dead ssh healthy.
+	if s.held[localPort] {
+		s.tunnelOnHeld = true
+	}
+	if s.startErr == nil {
+		if s.tunnelPorts == nil {
+			s.tunnelPorts = map[int]int{}
+		}
+		s.tunnelPorts[s.tunnelPID] = localPort
+	}
 	s.mu.Unlock()
 	if s.startErr != nil {
 		return 0, s.startErr
 	}
 	return s.tunnelPID, nil
+}
+
+// portTaken reports whether anything — a reservation or a live tunnel — is on
+// this port. Must be called with the lock held.
+func (s *fakeSSH) portTaken(port int) bool {
+	if s.held[port] {
+		return true
+	}
+	for _, p := range s.tunnelPorts {
+		if p == port {
+			return true
+		}
+	}
+	return false
 }
 
 // lastRemotePort reports the forward target of the most recent StartTunnel.
@@ -336,6 +380,7 @@ func (s *fakeSSH) StopTunnel(pid int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stoppedPIDs = append(s.stoppedPIDs, pid)
+	delete(s.tunnelPorts, pid) // its local port is free again
 	return nil
 }
 func (s *fakeSSH) WaitForSSH(ctx context.Context, host string, port int) error { return nil }
@@ -349,7 +394,56 @@ func (s *fakeSSH) RunRemoteCommand(host string, port int, cmd string) ([]byte, e
 	}
 	return []byte("ALIVE"), nil
 }
-func (s *fakeSSH) FindFreePort(basePort int) (int, error) { return basePort, nil }
+
+// ReservePort mirrors the real one: an explicit port is honoured or refused, a
+// zero one scans up from basePort past whatever is still held, and the hold
+// lasts until release. The fake owns no sockets, so "held" is a set — but it
+// has to be a real set rather than a flag, or the scan the multi-instance case
+// depends on is never exercised above the ssh package.
+func (s *fakeSSH) ReservePort(preferred, basePort int) (int, func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reserveErr != nil {
+		return 0, nil, s.reserveErr
+	}
+	if s.held == nil {
+		s.held = map[int]bool{}
+	}
+	port := preferred
+	if port > 0 {
+		if s.portTaken(port) {
+			return 0, nil, fmt.Errorf("local port %d is not available", port)
+		}
+	} else {
+		for port = basePort; s.portTaken(port); port++ {
+		}
+	}
+	s.reservedPorts = append(s.reservedPorts, port)
+	s.held[port] = true
+	var once sync.Once
+	return port, func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.held, port)
+			s.mu.Unlock()
+		})
+	}, nil
+}
+
+// localPortOfTunnel reports the local end of the most recent StartTunnel.
+func (s *fakeSSH) localPortOfTunnel() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tunnelLocalPort
+}
+
+// tunnelStartedWhileHeld reports whether any tunnel was started before its port
+// reservation had been released.
+func (s *fakeSSH) tunnelStartedWhileHeld() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tunnelOnHeld
+}
 func (s *fakeSSH) WaitForServerHealth(ctx context.Context, localPort int, healthPath string) error {
 	if s.healthWait > 0 {
 		select {

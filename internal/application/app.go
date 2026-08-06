@@ -101,9 +101,10 @@ func (app *App) Stop(ctx context.Context, id int64) error {
 }
 
 // Start resumes a stopped instance and re-establishes its tunnel. The inverse of
-// Stop — without it, `stop` would be a one-way door out of this CLI.
-func (app *App) Start(ctx context.Context, id int64) error {
-	return app.DeploySvc.Start(ctx, id)
+// Stop — without it, `stop` would be a one-way door out of this CLI. localPort
+// pins the local end of the new tunnel; zero takes the next free one.
+func (app *App) Start(ctx context.Context, id int64, localPort int) error {
+	return app.DeploySvc.Start(ctx, id, localPort)
 }
 
 func (app *App) Destroy(ctx context.Context, id int64) error {
@@ -149,9 +150,10 @@ func (app *App) SyncInstances(ctx context.Context) ([]*entity.Instance, error) {
 }
 
 // EstablishTunnel re-attaches an SSH tunnel to an existing vast.ai instance.
-// Used by `mycodeagent tunnel <vastai_id>`.
-func (app *App) EstablishTunnel(ctx context.Context, vastaiID int64) (*entity.Instance, error) {
-	return app.InstanceSvc.EstablishTunnel(ctx, vastaiID)
+// Used by `mycodeagent tunnel <vastai_id>`. localPort pins the local end; zero
+// takes the next free one.
+func (app *App) EstablishTunnel(ctx context.Context, vastaiID int64, localPort int) (*entity.Instance, error) {
+	return app.InstanceSvc.EstablishTunnel(ctx, vastaiID, localPort)
 }
 
 // GetServedModelInfo reads the localhost /v1/models endpoint of a running

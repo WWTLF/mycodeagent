@@ -10,10 +10,14 @@ import (
 )
 
 func NewTunnelCmd(app *application.App) *cobra.Command {
-	return &cobra.Command{
+	var port int
+
+	cmd := &cobra.Command{
 		Use:   "tunnel <vastai_id>",
 		Short: "Re-establish SSH tunnel to an existing instance (takes the VAST ID, not the local one)",
-		Args:  cobra.ExactArgs(1),
+		Long: "Re-attach an SSH tunnel to a running instance, by vast.ai ID.\n\n" +
+			portHelp,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			vastaiID, err := strconv.ParseInt(args[0], 10, 64)
@@ -22,7 +26,7 @@ func NewTunnelCmd(app *application.App) *cobra.Command {
 			}
 
 			fmt.Println("Re-establishing tunnel...")
-			inst, err := app.EstablishTunnel(ctx, vastaiID)
+			inst, err := app.EstablishTunnel(ctx, vastaiID, port)
 			if err != nil {
 				return err
 			}
@@ -52,4 +56,8 @@ func NewTunnelCmd(app *application.App) *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().IntVar(&port, "port", 0, portFlagUsage)
+
+	return cmd
 }

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -144,7 +145,13 @@ const defaultRemotePort = 8000
 // localhost through nothing at all until it timed out, and the dead ssh sat
 // around as a zombie because nobody ever reaped it. Observed live: a host whose
 // TCP port answered but whose key auth failed burned a full deploy that way.
-func StartTunnel(localPort int, sshHost string, sshPort, remotePort int) (*Tunnel, error) {
+// release, when non-nil, is the reservation holding localPort — see ReservePort.
+// It is dropped here rather than by the caller because the two steps have to be
+// adjacent and in this order, and getting it wrong does not fail loudly: ssh
+// exits on `bind: Address already in use`, but the readiness dial below would
+// connect to the *reservation's* listener and report a healthy tunnel for an ssh
+// that is already dead. Owning the handoff makes that unrepresentable.
+func StartTunnel(localPort int, sshHost string, sshPort, remotePort int, release func()) (*Tunnel, error) {
 	if remotePort <= 0 {
 		remotePort = defaultRemotePort
 	}
@@ -162,6 +169,10 @@ func StartTunnel(localPort int, sshHost string, sshPort, remotePort int) (*Tunne
 	cmd.Stderr = &stderr
 
 	fmt.Printf("[ssh] %s\n", cmd.String())
+
+	if release != nil {
+		release()
+	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start ssh tunnel: %w", err)
@@ -402,14 +413,82 @@ func runRemoteCommand(ctx context.Context, sshHost string, sshPort int, command 
 	return out, err
 }
 
-// FindFreePort returns an available TCP port starting from basePort.
-func FindFreePort(basePort int) (int, error) {
-	for port := basePort; port < basePort+100; port++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-		if err == nil {
-			ln.Close()
-			return port, nil
+// portScanRange is how many ports above basePort are tried before giving up —
+// the ceiling on concurrently tunnelled instances.
+const portScanRange = 100
+
+// ReservePort picks the local end of a tunnel and *holds* it until the returned
+// release is called.
+//
+// Holding is the point. The port is now chosen at the very top of a deploy so
+// the endpoint URL can be printed before the GPU is rented, which means the
+// number has to still be true ten minutes later when ssh finally binds it. The
+// previous FindFreePort bound a port, closed it immediately and returned the
+// number, leaving the whole provisioning window open for a second `init` to
+// choose the same one: both would announce the same URL, and the loser's tunnel
+// would die on `bind: Address already in use` — taking a rented instance down
+// with it, since a failed deploy destroys what it created.
+//
+// preferred > 0 pins the port (`--port`) and fails on the spot if it is taken.
+// That is deliberate: a one-line error now beats the same error arriving after
+// a GPU has been billing for ten minutes. preferred == 0 scans up from basePort.
+//
+// release is idempotent, because callers both defer it and call it explicitly
+// just before StartTunnel — ssh cannot bind a port this process still holds.
+func ReservePort(preferred, basePort int) (int, func(), error) {
+	if preferred != 0 {
+		// Checked rather than ignored: a negative value would silently fall
+		// through to the scan and hand back a port nobody asked for, and an
+		// out-of-range one would be reported as an unavailable port.
+		if preferred < 1 || preferred > 65535 {
+			return 0, nil, fmt.Errorf("invalid local port %d: must be 1-65535", preferred)
 		}
+		ln, err := listenLocal(preferred)
+		if err != nil {
+			// Deliberately "not available" and not "already in use": bind also
+			// fails with permission denied below 1024, and naming the wrong
+			// cause sends the operator hunting for a process that never existed.
+			return 0, nil, fmt.Errorf("local port %d is not available: %w", preferred, err)
+		}
+		return preferred, holdPort(ln), nil
 	}
-	return 0, fmt.Errorf("no free port found starting from %d", basePort)
+	for port := basePort; port < basePort+portScanRange; port++ {
+		ln, err := listenLocal(port)
+		if err != nil {
+			continue
+		}
+		return port, holdPort(ln), nil
+	}
+	return 0, nil, fmt.Errorf("no free port found in %d-%d", basePort, basePort+portScanRange-1)
+}
+
+// listenLocal binds the address `ssh -L` binds. The wildcard `:port` used before
+// answers a different question: a service bound to, say, 172.17.0.1:8010 makes
+// the wildcard bind fail even though ssh would have taken 127.0.0.1:8010 without
+// trouble — and, now that the socket is held for a whole deploy rather than
+// microseconds, the wildcard would leave the port open to the LAN for as long as
+// the download takes.
+func listenLocal(port int) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+}
+
+// holdPort keeps a reservation alive and hangs up on anything that connects to
+// it, returning an idempotent release.
+//
+// The refusal matters because the URL is announced up front: a client that tries
+// it early would otherwise complete a handshake into a backlog nobody ever
+// accepts, and hang until its own timeout. Accepting and closing immediately
+// gives it an instant EOF, which reads as "not up yet" the way a closed port does.
+func holdPort(ln net.Listener) func() {
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // the listener was closed: the reservation is over
+			}
+			_ = conn.Close()
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { _ = ln.Close() }) }
 }

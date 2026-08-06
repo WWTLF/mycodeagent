@@ -90,7 +90,11 @@ type SSHTunnelProvider interface {
 	// StartTunnel forwards localPort to remotePort on the instance. remotePort
 	// comes from EngineProvider.ServerPort — it is not a constant, because
 	// llama-server, ComfyUI and Jupyter all listen on different ports.
-	StartTunnel(localPort int, sshHost string, sshPort, remotePort int) (pid int, err error)
+	//
+	// It also takes ownership of the port reservation, dropping release
+	// immediately before ssh binds: nothing outside can order those two steps
+	// safely. Pass nil when no port was reserved.
+	StartTunnel(localPort int, sshHost string, sshPort, remotePort int, release func()) (pid int, err error)
 	StopTunnel(pid int) error
 	// StartSync launches the background rsync loop for an engine's output
 	// directories and returns its pid (0 when the engine produces nothing).
@@ -103,7 +107,11 @@ type SSHTunnelProvider interface {
 	StopSync(pid int) error
 	WaitForSSH(ctx context.Context, host string, port int) error
 	RunRemoteCommand(sshHost string, sshPort int, command string) ([]byte, error)
-	FindFreePort(basePort int) (int, error)
+	// ReservePort picks the local end of the tunnel and holds it until release
+	// is called, so the endpoint printed at the top of a deploy is still free
+	// when ssh binds it minutes later. preferred == 0 means "next one free from
+	// basePort"; a non-zero preferred fails immediately if that port is taken.
+	ReservePort(preferred, basePort int) (localPort int, release func(), err error)
 	WaitForServerHealth(ctx context.Context, localPort int, healthPath string) error
 }
 
@@ -122,6 +130,11 @@ type DeployOptions struct {
 	// into. Empty keeps the default, <cwd>/workspace. Applies to any engine
 	// that declares SyncDirs — notebooks and ComfyUI output alike.
 	SyncFolder string
+	// LocalPort pins the local end of the SSH tunnel. Zero — the default — takes
+	// the next port free from base_port, which is what lets several instances
+	// run at once without the operator tracking numbers. Pin it when a client
+	// config names a fixed URL and has to keep working across a stop/start.
+	LocalPort int
 }
 
 type OfferResult struct {
@@ -371,6 +384,19 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, opts Deplo
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// The port is claimed before anything is rented, so the very first line of a
+	// deploy is the URL the operator will end up using. It used to be the last
+	// line instead, printed after the health check — which meant the address was
+	// unknown for the twenty minutes it took to get there, and a second deploy
+	// started in the meantime had no way to know which port it would land on.
+	// The reservation is held (not just probed) so the promise survives the wait.
+	localPort, releasePort, err := s.ssh.ReservePort(opts.LocalPort, s.basePort)
+	if err != nil {
+		return nil, fmt.Errorf("reserve local port: %w", err)
+	}
+	defer releasePort()
+	fmt.Printf("Endpoint (live once the server is up): %s\n", endpointURL(model, localPort))
+
 	fmt.Printf("Startup timeout: %s\n", timeout)
 
 	numGPUs := model.NumGPUs
@@ -464,13 +490,8 @@ func (s *DeployService) Deploy(ctx context.Context, modelName string, opts Deplo
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
 
-	localPort, err := s.ssh.FindFreePort(s.basePort)
-	if err != nil {
-		return nil, fmt.Errorf("find free port: %w", err)
-	}
-
 	fmt.Printf("Starting SSH tunnel on port %d...\n", localPort)
-	tunnelPID, err = s.ssh.StartTunnel(localPort, sshHost, sshPort, s.engine.ServerPort(model))
+	tunnelPID, err = s.ssh.StartTunnel(localPort, sshHost, sshPort, s.engine.ServerPort(model), releasePort)
 	if err != nil {
 		return nil, fmt.Errorf("start tunnel: %w", err)
 	}
@@ -747,6 +768,14 @@ func (s *DeployService) engineEnv(model *entity.Model, opts DeployOptions) map[s
 type CreateOnlyResult struct {
 	Instance     *entity.Instance
 	ServeCommand string
+	// The manual-tunnel instructions, resolved here because they are all
+	// engine-specific and the command layer must not know an engine's port or
+	// whether it speaks /v1. The printed recipe used to be hardcoded to
+	// llama.cpp's 8000 and a /v1 suffix, so for ComfyUI (8188, web UI) and
+	// Jupyter (8888) it described a forward to a closed port and a 404.
+	ServerPort  int // the engine's port inside the container
+	LocalPort   int // the local end the instructions suggest
+	EndpointURL string
 }
 
 // DeployCreateOnly creates the instance and waits for it to be running, but does not
@@ -819,7 +848,20 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 		return nil, fmt.Errorf("save instance: %w", err)
 	}
 
-	return &CreateOnlyResult{Instance: inst, ServeCommand: s.engine.BuildRawCommand(model, offer.NumGPUs, contextLength)}, nil
+	// No tunnel is opened on this path, so nothing was reserved — the local port
+	// is only a suggestion, and --port is how the user names the one they want.
+	localPort := opts.LocalPort
+	if localPort <= 0 {
+		localPort = s.basePort
+	}
+
+	return &CreateOnlyResult{
+		Instance:     inst,
+		ServeCommand: s.engine.BuildRawCommand(model, offer.NumGPUs, contextLength),
+		ServerPort:   s.engine.ServerPort(model),
+		LocalPort:    localPort,
+		EndpointURL:  endpointURL(model, localPort),
+	}, nil
 }
 
 // Start resumes a stopped instance and re-establishes its tunnel.
@@ -833,7 +875,12 @@ func (s *DeployService) DeployCreateOnly(ctx context.Context, modelName string, 
 // vast.ai re-runs the onstart script on container start, so the model server
 // comes back by itself and the GGUF is still in the container-disk cache — this
 // is the one path that skips the download.
-func (s *DeployService) Start(ctx context.Context, id int64) error {
+//
+// localPort pins the local end of the new tunnel; zero takes the next free one.
+// vast.ai reassigns the SSH endpoint on resume, so the tunnel is rebuilt from
+// scratch either way — pinning is how a client config that names a fixed URL
+// survives a stop/start cycle.
+func (s *DeployService) Start(ctx context.Context, id int64, localPort int) error {
 	inst, err := s.instances.FindByID(id)
 	if err != nil {
 		return err
@@ -852,6 +899,15 @@ func (s *DeployService) Start(ctx context.Context, id int64) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// Claimed and announced before the GPU is resumed, for the same reason as in
+	// Deploy — see ReservePort.
+	localPort, releasePort, err := s.ssh.ReservePort(localPort, s.basePort)
+	if err != nil {
+		return fmt.Errorf("reserve local port: %w", err)
+	}
+	defer releasePort()
+	fmt.Printf("Endpoint (live once the server is up): %s\n", endpointURL(model, localPort))
 
 	fmt.Printf("Starting instance %d (%s)...\n", inst.VastaiID, inst.ModelName)
 	if err := s.vastai.StartInstance(int(inst.VastaiID)); err != nil {
@@ -878,13 +934,8 @@ func (s *DeployService) Start(ctx context.Context, id int64) error {
 		return warn(fmt.Errorf("wait for SSH: %w", err))
 	}
 
-	localPort, err := s.ssh.FindFreePort(s.basePort)
-	if err != nil {
-		return warn(fmt.Errorf("find free port: %w", err))
-	}
-
 	fmt.Printf("Starting SSH tunnel on port %d...\n", localPort)
-	tunnelPID, err := s.ssh.StartTunnel(localPort, sshHost, sshPort, s.engine.ServerPort(model))
+	tunnelPID, err := s.ssh.StartTunnel(localPort, sshHost, sshPort, s.engine.ServerPort(model), releasePort)
 	if err != nil {
 		return warn(fmt.Errorf("start tunnel: %w", err))
 	}
@@ -1023,15 +1074,28 @@ func (s *DeployService) Restart(ctx context.Context, id int64) error {
 	return nil
 }
 
+// endpointURL is the address a tunnel on localPort exposes: /v1 for the
+// OpenAI-speaking engines, the bare root for the ones serving a web UI.
+//
+// Shared by the line printed before the deploy starts and the one printed after
+// it succeeds, so the URL promised up front is the same string confirmed later —
+// two format calls would eventually disagree about the /v1.
+func endpointURL(model *entity.Model, localPort int) string {
+	if servesOpenAIAPI(model) {
+		return fmt.Sprintf("http://localhost:%d/v1", localPort)
+	}
+	return fmt.Sprintf("http://localhost:%d", localPort)
+}
+
 // announceEndpoint prints where the instance can be reached.
 //
 // It used to be a hardcoded "API available at http://localhost:PORT/v1" for
 // every engine, which for ComfyUI and Jupyter named a path that does not exist
 // on them — the last line of a successful deploy sent the operator to a 404.
 func announceEndpoint(model *entity.Model, localPort int) {
+	label := "Open in a browser:"
 	if servesOpenAIAPI(model) {
-		fmt.Printf("\nAPI available at: http://localhost:%d/v1\n", localPort)
-		return
+		label = "API available at:"
 	}
-	fmt.Printf("\nOpen in a browser: http://localhost:%d\n", localPort)
+	fmt.Printf("\n%s %s\n", label, endpointURL(model, localPort))
 }
