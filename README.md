@@ -6,6 +6,7 @@ minutes you actually used.
 
 ```
 $ mycodeagent init coder-max
+Endpoint (live once the server is up): http://localhost:8000/v1
 Startup timeout: 30m0s
 Searching for 1x GPU with >= 48GB VRAM (host disk >= 50GB)...
 Selected: 1x RTX A6000 (48 GB each) at $0.397/hr
@@ -38,8 +39,8 @@ Or grab a binary from [Releases](https://github.com/WWTLF/mycodeagent/releases) 
 Linux and macOS, amd64 and arm64:
 
 ```bash
-tar xzf mycodeagent_v0.4.1_linux_amd64.tar.gz
-sudo mv mycodeagent_v0.4.1_linux_amd64 /usr/local/bin/mycodeagent
+tar xzf mycodeagent_v0.5.0_linux_amd64.tar.gz
+sudo mv mycodeagent_v0.5.0_linux_amd64 /usr/local/bin/mycodeagent
 ```
 
 Windows is not built yet: the tunnel uses `Setpgid` and `syscall.Kill`, which don't
@@ -129,6 +130,24 @@ ID  VAST ID   STATUS   ALIAS      MODEL           HEALTH   TUNNEL URL
 
 `ID` is the local number every command takes. `VAST ID` is vast.ai's own — only
 `tunnel` wants that one.
+
+### Several at once
+
+Nothing stops you running more than one. Each deploy takes the next free local
+port, so a second `init` lands on `8001`, a third on `8002`, and `ps` shows each
+URL. The port is claimed before the GPU is rented and printed as the first line
+of the run, so you know the address while the model is still downloading.
+
+`--port` pins it instead:
+
+```bash
+mycodeagent init coder --port 8010
+```
+
+Worth doing when something already names the URL — an opencode profile, a
+script, a browser tab — because `stop`/`start` and `tunnel` otherwise rebuild
+the tunnel on whatever port is free at the time. Both take `--port` too. A port
+that is already in use fails immediately, before anything is billing.
 
 ### Talking to it
 
@@ -414,13 +433,13 @@ normal — `init` reports progress separately.
 |---|---|
 | `login` | Store the vast.ai key + HF token, upload your SSH key |
 | `models` | Catalog with live pricing |
-| `init <model>` | Rent, start, tunnel. `--country`, `--provisioning`, `--sync-folder`, `--create-instance-only` |
+| `init <model>` | Rent, start, tunnel. `--country`, `--provisioning`, `--sync-folder`, `--port`, `--create-instance-only` |
 | `ps` | List instances with health |
 | `config` | Write running instances into opencode's config |
 | `kill <id>` | Destroy. The normal way to finish. |
-| `stop <id>` / `start <id>` | Release the GPU but keep the disk / resume |
+| `stop <id>` / `start <id>` | Release the GPU but keep the disk / resume (`--port`) |
 | `restart <id>` | Restart the model server on a live instance |
-| `tunnel <vastai_id>` | Re-attach a dead tunnel |
+| `tunnel <vastai_id>` | Re-attach a dead tunnel (`--port`) |
 | `log <id>` | Instance bootstrap log |
 | `budget` | Spend so far and the run rate |
 | `hosts` | Inspect / clear the bad-host list |
