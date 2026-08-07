@@ -413,3 +413,46 @@ func TestSyncScriptExcludesVirtualenvsAndRepoJunk(t *testing.T) {
 		t.Errorf("expected .venv excluded on push and pull (2 occurrences), got %d", n)
 	}
 }
+
+// The built-in list cannot know that an ML repository keeps a 3 GB corpus of raw
+// downloads beside the two files training reads. Only the repository knows, so it
+// says so in .syncignore and those patterns join the built-in ones.
+func TestSyncScriptHonoursProjectSyncIgnore(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, SyncIgnoreFile),
+		[]byte("# промежуточные данные, нужны только локально\ndata/fineweb\n\ndata/books_raw\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := buildSyncScript("host", 22,
+		[]entity.SyncDir{{RemoteCandidates: []string{"/workspace"}, Local: "workspace", Push: true}},
+		root)
+
+	for _, pattern := range []string{"data/fineweb", "data/books_raw"} {
+		if n := strings.Count(script, "--exclude="+shellQuote(pattern)); n != 2 {
+			t.Errorf("pattern %q from %s must be excluded on push and pull, got %d occurrences",
+				pattern, SyncIgnoreFile, n)
+		}
+	}
+	// Комментарии и пустые строки — не шаблоны.
+	for _, junk := range []string{"# промежуточные данные, нужны только локально", ""} {
+		if junk != "" && strings.Contains(script, "--exclude="+shellQuote(junk)) {
+			t.Errorf("comment leaked into rsync flags: %q", junk)
+		}
+	}
+	// Встроенные исключения никуда не делись.
+	if !strings.Contains(script, "--exclude="+shellQuote(".venv")) {
+		t.Error("project patterns replaced the built-in list instead of joining it")
+	}
+}
+
+// Отсутствующий .syncignore — обычное дело, а не ошибка.
+func TestSyncScriptWithoutSyncIgnoreStillExcludesBuiltins(t *testing.T) {
+	script := buildSyncScript("host", 22,
+		[]entity.SyncDir{{RemoteCandidates: []string{"/workspace"}, Local: "workspace"}},
+		t.TempDir())
+	if !strings.Contains(script, "--exclude="+shellQuote("__pycache__")) {
+		t.Error("built-in exclusions lost when .syncignore is absent")
+	}
+}

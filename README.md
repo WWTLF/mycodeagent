@@ -258,6 +258,25 @@ your notebooks read is still in flight ten minutes later. It is useless on arriv
 anyway: the instance has its own interpreter, and a venv built on your machine has
 your machine's paths baked into it.
 
+**Your project decides the rest.** The built-in list covers what is wrong to send
+from any project. What is merely *pointless* to send is project knowledge: an ML
+repository keeps raw downloads and intermediate corpora beside the two files
+training actually reads, and only the repository knows which is which. Put a
+`.syncignore` in the sync root, one rsync pattern per line:
+
+```
+# промежуточные данные, нужны только локально
+data/fineweb
+data/books_raw
+```
+
+Blank lines and `#` comments are ignored, so the file can explain itself. The
+patterns join the built-in ones rather than replacing them, and apply in both
+directions. A missing file means nothing extra — this is opt-in.
+
+Without it the choice is between hauling gigabytes on every deploy and deleting
+work you still need locally.
+
 If the tunnel dies, `mycodeagent tunnel <vastai_id>` restarts the sync along with it.
 
 **Choosing where it lands.** `workspace/` in the working directory is awkward when

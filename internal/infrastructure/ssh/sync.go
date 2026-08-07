@@ -146,10 +146,43 @@ var syncExcluded = []string{
 	".DS_Store",
 }
 
-// syncExcludeFlags renders syncExcluded as rsync arguments.
-func syncExcludeFlags() string {
-	parts := make([]string, 0, len(syncExcluded))
-	for _, e := range syncExcluded {
+// SyncIgnoreFile is read from the sync root, one rsync pattern per line, and
+// its entries join the built-in exclusions.
+//
+// The built-in list covers what is wrong to send from *any* project — a
+// virtualenv, a git directory, compiled caches. What is merely *pointless* to
+// send is project knowledge and cannot live here: an ML repository keeps raw
+// downloads and intermediate corpora beside the two files training actually
+// reads, and only the repository knows which is which. Without a way to say so,
+// the choice is between hauling gigabytes on every deploy and deleting work.
+//
+// Blank lines and lines starting with # are ignored, so the file can explain
+// itself.
+const SyncIgnoreFile = ".syncignore"
+
+// readSyncIgnore returns the patterns listed in <root>/.syncignore.
+// A missing or unreadable file is not an error — it means "nothing extra".
+func readSyncIgnore(root string) []string {
+	data, err := os.ReadFile(filepath.Join(root, SyncIgnoreFile))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// syncExcludeFlags renders the built-in exclusions plus the project's own.
+func syncExcludeFlags(root string) string {
+	patterns := append(append([]string{}, syncExcluded...), readSyncIgnore(root)...)
+	parts := make([]string, 0, len(patterns))
+	for _, e := range patterns {
 		parts = append(parts, "--exclude="+shellQuote(e))
 	}
 	return strings.Join(parts, " ")
@@ -187,7 +220,7 @@ func buildSyncScript(sshHost string, sshPort int, dirs []entity.SyncDir, root st
 		// copy. It is confined to two-way directories: for a pull-only one the
 		// remote is the sole author, and skipping a file because the local mtime
 		// happens to be ahead would mean never pulling it.
-		flags := "-az --partial " + syncExcludeFlags()
+		flags := "-az --partial " + syncExcludeFlags(root)
 		if d.Push {
 			flags += " --update"
 		}
