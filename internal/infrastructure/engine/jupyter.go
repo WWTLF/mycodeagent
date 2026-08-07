@@ -11,7 +11,26 @@ const (
 	// Verified against the registry: "cuda12" is not a tag vastai/pytorch publishes
 	// (1145 tags, none by that name), so this 404'd on every deploy. Pinned to a
 	// dated build for reproducibility.
-	jupyterImage      = "vastai/pytorch:2.12.0-cuda-12.6.3-24.04-2026-06-15"
+	//
+	// CUDA 12.6 -> 13.0: the 12.6 wheel is built for sm_50…sm_90 and has no kernel
+	// image for sm_120, so every Blackwell card the search picked — 5060 Ti, 5070,
+	// 5080, all of them cheap and plentiful at 16GB — died on its first CUDA call
+	// with "no kernel image is available for execution on the device". Not a
+	// startup failure either: the deploy reported healthy and the card only failed
+	// once a notebook touched it.
+	//
+	// Measured, not assumed: a cu130 build reports
+	//   sm_75, sm_80, sm_86, sm_90, sm_100, sm_120
+	// against cu126's sm_50, sm_60, sm_70, sm_75, sm_80, sm_86, sm_90.
+	//
+	// So the move gains Blackwell (sm_120) and B200 (sm_100) and drops sm_50/60/70
+	// — Maxwell, Pascal and Volta. That trade costs nothing here: bf16 needs
+	// compute capability 8.0, torch.cuda.is_bf16_supported() is false on all three,
+	// and a training run in fp32 on a V100 is not something worth renting.
+	//
+	// The torch version is deliberately unchanged (2.12.0), as is the build date:
+	// one variable moves, so a failure has one suspect.
+	jupyterImage      = "vastai/pytorch:2.12.0-cuda-13.0.3-24.04-2026-06-15"
 	jupyterServerPort = 8888
 
 	// Neither path contains the literal "jupyter". That is not cosmetic: the

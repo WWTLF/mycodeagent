@@ -101,6 +101,13 @@ this was written. The top three aren't language models, so most columns don't ap
 | `jupyter` | Not a language model — a GPU notebook. 32 GB. |
 | `jupyter-mini` | The same notebook on the cheapest card. 16 GB — enough for a 7B in 4-bit, a small fine-tune, or ordinary dataframe work. |
 
+Both Jupyter images carry PyTorch 2.12 built for CUDA 13, which covers Turing
+through Blackwell — `sm_75, sm_80, sm_86, sm_90, sm_100, sm_120`. Maxwell, Pascal
+and Volta (a V100 among them) are outside it and will fail on their first CUDA
+call rather than at deploy time. That is the intended trade: those three
+generations predate bfloat16, so anything you would rent a GPU to train is
+already ruled out on them.
+
 The short version: **`coder` unless you have a reason.** `coder-max` if quality
 matters more than $0.28/hr. `coder-fast` only if you're impatient — it's a mixture-of-
 experts model that activates 3B of its 35B per token, so it's quick but noticeably
