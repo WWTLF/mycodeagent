@@ -199,8 +199,18 @@ type EngineProvider interface {
 | Engine | `EngineType` | Docker Image | Server Port | Health |
 |---|---|---|---|---|
 | **LlamaCppEngine** | `llamacpp` (default) | `ghcr.io/ggml-org/llama.cpp:server-cuda-b10156` | 8000 | `/v1/models` |
-| **ComfyUIEngine** | `comfyui` | `ghcr.io/ai-dock/comfyui:cuda-12.8.1-runtime-ubuntu24.04` | 8188 | `/history` |
-| **JupyterEngine** | `jupyter` | `vastai/pytorch:cuda12` | 8888 | `/` |
+| **ComfyUIEngine** | `comfyui` | `vastai/comfy:v0.29.2-cuda-12.9-py312` | 8188 | `/history` |
+| **JupyterEngine** | `jupyter` | `vastai/pytorch:2.12.0-cuda-13.0.3-24.04-2026-06-15` | 8888 | `/` |
+
+Both non-llama.cpp images are pinned to an exact tag rather than a floating one.
+`vastai/pytorch:cuda12` — what this table used to claim — is not a tag that
+registry publishes at all, so it 404'd on every deploy. The Jupyter pin is on
+**CUDA 13** because the 12.6 wheel carries no kernel image for `sm_120`: every
+Blackwell card the offer search picked (5060 Ti, 5070, 5080 — the cheap, plentiful
+16 GB parts) reported healthy at deploy time and then died on the first CUDA call
+in a notebook, after a corpus had already been synced to it. cu130 covers
+`sm_75…sm_120` and drops `sm_50/60/70`; all three of those predate bfloat16, so
+nothing worth renting a GPU for was lost.
 
 #### Three rules a new engine has to obey
 
