@@ -202,6 +202,13 @@ type EngineProvider interface {
 | **ComfyUIEngine** | `comfyui` | `vastai/comfy:v0.29.2-cuda-12.9-py312` | 8188 | `/history` |
 | **JupyterEngine** | `jupyter` | `vastai/pytorch:2.12.0-cuda-13.0.3-24.04-2026-06-15` | 8888 | `/` |
 
+**This table is checked against the code**, by
+`engine.TestSolutionDocEngineTableMatchesTheCode`: every row's image, port and
+health path must equal what the engine returns, every engine `MultiEngine`
+dispatches to must have a row, and a row naming an engine that no longer exists
+fails too. Bumping an image is a one-line change and the doc edit is easy to
+forget — this table went two releases naming a Jupyter tag that did not exist.
+
 Both non-llama.cpp images are pinned to an exact tag rather than a floating one.
 `vastai/pytorch:cuda12` — what this table used to claim — is not a tag that
 registry publishes at all, so it 404'd on every deploy. The Jupyter pin is on
