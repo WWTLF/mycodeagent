@@ -25,19 +25,19 @@ That puts the binary in `$(go env GOPATH)/bin` — make sure it is on your `PATH
 
 ```bash
 export PATH="$PATH:$(go env GOPATH)/bin"
-mycodeagent --version        # mycodeagent version v0.5.0
+mycodeagent --version        # mycodeagent version v0.6.0
 ```
 
 Pin a version instead of tracking the latest release:
 
 ```bash
-go install github.com/WWTLF/mycodeagent/cmd/mycodeagent@v0.5.0
+go install github.com/WWTLF/mycodeagent/cmd/mycodeagent@v0.6.0
 ```
 
 The version is reported even from a `go install` build, because it falls back to
 the module version Go records in `debug.BuildInfo` when no `-ldflags` stamp is
 present. A build from a git checkout gets the stamp instead and reports the exact
-commit (`v0.5.0-3-gabc1234`).
+commit (`v0.6.0-3-gabc1234`).
 
 Prebuilt tarballs are on the [releases
 page](https://github.com/WWTLF/mycodeagent/releases) for linux and darwin,
@@ -156,7 +156,7 @@ a broken `init` never leaves a paid GPU running. Ctrl-C does the same.
 | Flag | Default | Purpose |
 |---|---|---|
 | `--country <codes>` | anywhere | Restrict the offer search to ISO-3166 alpha-2 codes, comma-separated: `--country RO,DE`. The search sorts purely by price, which is how three deploys in a row can land in a region whose route to HuggingFace runs at ~1 MB/s. Codes are validated first — vast.ai answers an unknown code with an empty result set that is indistinguishable from "your filters are too tight". |
-| `--sync-folder <path>` | `./workspace` | Where the instance's files are kept locally. Used as given: a one-directory engine (Jupyter) syncs into it directly, ComfyUI keeps `output/` and `workflows/` under it. Resolved to an absolute path and stored on the instance, so a later `tunnel` or `start` from a different directory syncs to the same place. Virtualenvs, `__pycache__`, `.git`, `node_modules`, `.ipynb_checkpoints` and tool caches are excluded in both directions. Ignored by engines that write nothing. |
+| `--sync-folder <path>` | `./workspace` | Where the instance's files are kept locally. Used as given: a one-directory engine (Jupyter) syncs into it directly, ComfyUI keeps `output/` and `workflows/` under it. Resolved to an absolute path and stored on the instance, so a later `tunnel` or `start` from a different directory syncs to the same place. Virtualenvs, `__pycache__`, `.git`, `node_modules`, `.ipynb_checkpoints` and tool caches are excluded in both directions; a `.syncignore` in the sync root adds project-specific patterns to that list (see below). Ignored by engines that write nothing. |
 | `--provisioning <url>` | none | URL of a shell script the instance downloads and runs before its service starts. The supported way to get checkpoints and LoRAs onto a disposable machine. ComfyUI only; llama.cpp ignores it. The script runs on your rented machine **with your HF and CivitAI tokens in its environment**, so point it only at something you control. |
 | `--create-instance-only` | off | Create the instance and print SSH details, then stop. No tunnel, no health check, no auto-destroy. For debugging a deploy by hand. |
 | `--port <n>` | next free from `base_port` | Local end of the SSH tunnel. The default scan is what lets instances stack up — the first gets 8000, the second 8001 — so pin it only when something else already names the URL and must keep working across a `stop`/`start`. The port is claimed (held open) before the GPU is rented and the resulting URL is the **first line** of the run, so the address is known while the deploy is still provisioning; an unavailable port fails immediately instead of ten minutes in. With `--create-instance-only` nothing is claimed and the flag only sets the port in the printed `ssh` recipe. |
@@ -172,6 +172,24 @@ mycodeagent init comfyui \
 
 Startup takes 15–30 minutes of budget depending on the model, most of it the host
 pulling the image and the GGUF downloading. Progress is reported as it goes.
+
+#### `.syncignore`
+
+The built-in exclusions cover what is wrong to send from *any* project. What is
+merely pointless to send is project knowledge — an ML repository keeps raw
+downloads and intermediate corpora beside the two files training actually reads,
+and only that repository knows which is which. A `.syncignore` in the sync root
+names them, one rsync pattern per line:
+
+```
+# intermediate data, only needed locally
+data/fineweb
+data/books_raw
+```
+
+Blank lines and `#` comments are ignored, so the file can explain itself. The
+patterns **join** the built-in ones rather than replacing them, and apply in both
+directions. A missing file changes nothing — this is opt-in.
 
 ## Running instances
 
